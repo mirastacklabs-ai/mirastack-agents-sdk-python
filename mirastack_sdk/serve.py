@@ -141,30 +141,7 @@ class _PluginServiceAdapter:
             ],
         }
         if info.actions:
-            resp["actions"] = [
-                {
-                    "id": act.id,
-                    "description": act.description,
-                    "permission": act.permission.value + 1,
-                    "stages": [s.value + 1 for s in act.stages],
-                    "intents": [
-                        {
-                            "pattern": ip.pattern,
-                            "confidence": ip.priority / 10.0,
-                            "description": ip.description,
-                            "priority": ip.priority,
-                        }
-                        for ip in act.intents
-                    ],
-                    "input_params": json.dumps(
-                        [_param_to_dict(p) for p in act.input_params]
-                    ).encode() if act.input_params else None,
-                    "output_params": json.dumps(
-                        [_param_to_dict(p) for p in act.output_params]
-                    ).encode() if act.output_params else None,
-                }
-                for act in info.actions
-            ]
+            resp["actions"] = [_action_to_dict(act) for act in info.actions]
         if info.prompt_templates:
             resp["prompt_templates"] = [
                 {
@@ -191,7 +168,7 @@ class _PluginServiceAdapter:
     def GetSchema(self, request, context):
         """Handle PluginService.GetSchema RPC."""
         schema = self._plugin.schema()
-        return {
+        resp = {
             "params_json_schema": json.dumps(
                 [_param_to_dict(p) for p in schema.input_params]
             ).encode(),
@@ -199,6 +176,9 @@ class _PluginServiceAdapter:
                 [_param_to_dict(p) for p in schema.output_params]
             ).encode(),
         }
+        if schema.actions:
+            resp["actions"] = [_action_to_dict(act) for act in schema.actions]
+        return resp
 
     def Execute(self, request, context):
         """Handle PluginService.Execute RPC."""
@@ -226,7 +206,12 @@ class _PluginServiceAdapter:
 
         resp = self._run_async(self._plugin.execute(req))
 
-        result_json = json.dumps(resp.output).encode() if resp.output else b"{}"
+        if isinstance(resp.output, bytes):
+            result_json = resp.output
+        elif resp.output:
+            result_json = json.dumps(resp.output).encode()
+        else:
+            result_json = b"{}"
         logs = resp.logs or []
         return {
             "result_json": result_json,
@@ -256,6 +241,33 @@ def _param_to_dict(p: ParamSchema) -> dict:
         "required": p.required,
         "description": p.description,
     }
+
+
+def _action_to_dict(act) -> dict:
+    d: dict = {
+        "id": act.id,
+        "description": act.description,
+        "permission": act.permission.value + 1,
+        "stages": [s.value + 1 for s in act.stages],
+        "intents": [
+            {
+                "pattern": ip.pattern,
+                "confidence": ip.priority / 10.0,
+                "description": ip.description,
+                "priority": ip.priority,
+            }
+            for ip in act.intents
+        ],
+    }
+    if act.input_params:
+        d["input_params"] = json.dumps(
+            [_param_to_dict(p) for p in act.input_params]
+        ).encode()
+    if act.output_params:
+        d["output_params"] = json.dumps(
+            [_param_to_dict(p) for p in act.output_params]
+        ).encode()
+    return d
 
 
 def _build_generic_handler(adapter: _PluginServiceAdapter) -> grpc.GenericRpcHandler:

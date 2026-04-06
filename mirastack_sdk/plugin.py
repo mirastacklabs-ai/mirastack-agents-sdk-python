@@ -108,6 +108,7 @@ class Action:
 class PluginSchema:
     input_params: list[ParamSchema] = field(default_factory=list)
     output_params: list[ParamSchema] = field(default_factory=list)
+    actions: list[Action] = field(default_factory=list)
 
 
 @dataclass
@@ -136,7 +137,7 @@ class ExecuteRequest:
 
 @dataclass
 class ExecuteResponse:
-    output: dict[str, str] = field(default_factory=dict)
+    output: Any = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
 
 
