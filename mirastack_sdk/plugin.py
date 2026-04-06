@@ -47,6 +47,33 @@ class IntentPattern:
 
 
 @dataclass
+class ConfigParam:
+    """Declares a configuration parameter the plugin accepts.
+
+    The engine reads these from info() during registration and seeds them
+    into the unified settings store at plugin.{name}.{key}.
+    """
+    key: str
+    type: str = "string"      # "string", "int", "bool", "duration", "json"
+    required: bool = False
+    default: str = ""
+    description: str = ""
+    is_secret: bool = False
+
+
+@dataclass
+class PromptTemplate:
+    """A prompt template contributed by a plugin.
+
+    The engine auto-ingests these during plugin registration and makes them
+    available through the Prompt Template Store for LLM interactions.
+    """
+    name: str
+    description: str = ""
+    content: str = ""
+
+
+@dataclass
 class PluginInfo:
     name: str
     version: str
@@ -54,6 +81,27 @@ class PluginInfo:
     permissions: list[Permission] = field(default_factory=list)
     devops_stages: list[DevOpsStage] = field(default_factory=list)
     intents: list[IntentPattern] = field(default_factory=list)
+    actions: list[Action] = field(default_factory=list)
+    prompt_templates: list[PromptTemplate] = field(default_factory=list)
+    config_params: list[ConfigParam] = field(default_factory=list)
+
+
+@dataclass
+class Action:
+    """Describes a discrete operation a plugin can perform.
+
+    Actions are first-class entities that the engine maps intents to.
+    A plugin may declare zero or more actions. When actions are declared,
+    the engine registers their intents and routes matching user messages
+    directly to the plugin with the action_id set on ExecuteRequest.
+    """
+    id: str
+    description: str = ""
+    permission: Permission = Permission.READ
+    stages: list[DevOpsStage] = field(default_factory=list)
+    intents: list[IntentPattern] = field(default_factory=list)
+    input_params: list[ParamSchema] = field(default_factory=list)
+    output_params: list[ParamSchema] = field(default_factory=list)
 
 
 @dataclass
@@ -63,12 +111,27 @@ class PluginSchema:
 
 
 @dataclass
+class TimeRange:
+    """Pre-parsed, absolute UTC time range delivered by the engine.
+
+    Plugins receive this on ExecuteRequest and use SDK datetimeutils to format
+    epochs for their specific backends (Prometheus, Jaeger, VictoriaLogs, etc.).
+    """
+    start_epoch_ms: int = 0
+    end_epoch_ms: int = 0
+    timezone: str = ""
+    original_expression: str = ""
+
+
+@dataclass
 class ExecuteRequest:
     execution_id: str
     workflow_id: str
     step_id: str
+    action_id: str = ""
     params: dict[str, str] = field(default_factory=dict)
     mode: ExecutionMode = ExecutionMode.GUIDED
+    time_range: TimeRange | None = None
 
 
 @dataclass

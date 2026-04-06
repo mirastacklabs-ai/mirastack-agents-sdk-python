@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -22,7 +23,15 @@ from concurrent import futures
 
 import grpc
 
-from mirastack_sdk.plugin import Plugin
+from mirastack_sdk.context import EngineContext
+from mirastack_sdk.plugin import (
+    Plugin,
+    ExecuteRequest,
+    ExecuteResponse,
+    ExecutionMode,
+    ParamSchema,
+    TimeRange,
+)
 
 logger = logging.getLogger("mirastack_sdk")
 
@@ -47,26 +56,228 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
 
-    # TODO(phase-2): Register PluginService implementation that delegates to `plugin`
+    # Register the PluginService adapter that delegates to the Plugin interface.
+    # We dynamically build a gRPC servicer that bridges sync gRPC calls
+    # to the async Plugin methods using an event loop.
+    loop = asyncio.new_event_loop()
+    adapter = _PluginServiceAdapter(plugin, loop)
+
+    try:
+        from mirastack_sdk.gen import plugin_pb2_grpc  # type: ignore[import-untyped]
+        plugin_pb2_grpc.add_PluginServiceServicer_to_server(adapter, server)
+    except ImportError:
+        # Generated proto stubs not yet available — register via generic handler.
+        # This uses the method routing approach so the server still responds
+        # to PluginService RPC calls.
+        handler = _build_generic_handler(adapter)
+        server.add_generic_rpc_handlers([handler])
 
     port = server.add_insecure_port(listen_addr)
 
     # Write the actual port to stdout for the engine to discover
     print(f"MIRASTACK_PLUGIN_PORT={port}", flush=True)
 
+    # Connect to engine for EngineContext callbacks (if address provided)
+    engine_addr = os.environ.get("MIRASTACK_ENGINE_ADDR", "")
+    engine_ctx: EngineContext | None = None
+    if engine_addr:
+        try:
+            engine_ctx = EngineContext(engine_addr, info.name)
+            plugin._engine_context = engine_ctx  # type: ignore[attr-defined]
+            logger.info("Connected to engine for callbacks: %s", engine_addr)
+        except Exception:
+            logger.warning("Failed to connect to engine, callbacks unavailable", exc_info=True)
+
     server.start()
 
     logger.info("Plugin serving: %s v%s on port %d", info.name, info.version, port)
 
     # Handle shutdown signals
-    shutdown_event = asyncio.Event()
-
     def _signal_handler(sig: int, frame: object) -> None:
         logger.info("Shutting down plugin (signal %d)", sig)
-        shutdown_event.set()
         server.stop(grace=5)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     server.wait_for_termination()
+    loop.close()
+
+
+class _PluginServiceAdapter:
+    """Bridges the Python Plugin interface to gRPC PluginService RPCs.
+
+    gRPC Python uses synchronous servicers running in a ThreadPoolExecutor.
+    Plugin methods are async, so we run them on a dedicated event loop.
+    """
+
+    def __init__(self, plugin: Plugin, loop: asyncio.AbstractEventLoop) -> None:
+        self._plugin = plugin
+        self._loop = loop
+
+    def _run_async(self, coro):
+        """Run an async coroutine on the adapter's event loop from a sync context."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    # -- PluginService RPCs --
+
+    def Info(self, request, context):
+        """Handle PluginService.Info RPC."""
+        info = self._plugin.info()
+        resp = {
+            "name": info.name,
+            "version": info.version,
+            "description": info.description,
+            "permission": (info.permissions[0].value + 1) if info.permissions else 1,
+            "devops_stages": [s.value + 1 for s in info.devops_stages],
+            "default_intents": [
+                {
+                    "pattern": ip.pattern,
+                    "confidence": ip.priority / 10.0,
+                    "description": ip.description,
+                    "priority": ip.priority,
+                }
+                for ip in info.intents
+            ],
+        }
+        if info.actions:
+            resp["actions"] = [
+                {
+                    "id": act.id,
+                    "description": act.description,
+                    "permission": act.permission.value + 1,
+                    "stages": [s.value + 1 for s in act.stages],
+                    "intents": [
+                        {
+                            "pattern": ip.pattern,
+                            "confidence": ip.priority / 10.0,
+                            "description": ip.description,
+                            "priority": ip.priority,
+                        }
+                        for ip in act.intents
+                    ],
+                    "input_params": json.dumps(
+                        [_param_to_dict(p) for p in act.input_params]
+                    ).encode() if act.input_params else None,
+                    "output_params": json.dumps(
+                        [_param_to_dict(p) for p in act.output_params]
+                    ).encode() if act.output_params else None,
+                }
+                for act in info.actions
+            ]
+        if info.prompt_templates:
+            resp["prompt_templates"] = [
+                {
+                    "name": pt.name,
+                    "description": pt.description,
+                    "content": pt.content,
+                }
+                for pt in info.prompt_templates
+            ]
+        if info.config_params:
+            resp["config_schema"] = [
+                {
+                    "key": cp.key,
+                    "type": cp.type,
+                    "required": cp.required,
+                    "default": cp.default,
+                    "description": cp.description,
+                    "is_secret": cp.is_secret,
+                }
+                for cp in info.config_params
+            ]
+        return resp
+
+    def GetSchema(self, request, context):
+        """Handle PluginService.GetSchema RPC."""
+        schema = self._plugin.schema()
+        return {
+            "params_json_schema": json.dumps(
+                [_param_to_dict(p) for p in schema.input_params]
+            ).encode(),
+            "result_json_schema": json.dumps(
+                [_param_to_dict(p) for p in schema.output_params]
+            ).encode(),
+        }
+
+    def Execute(self, request, context):
+        """Handle PluginService.Execute RPC."""
+        params = json.loads(request.get("params_json", b"{}"))
+        mode_val = request.get("mode", 1)
+
+        req = ExecuteRequest(
+            execution_id=request.get("execution_id", ""),
+            workflow_id=request.get("workflow_id", ""),
+            step_id=request.get("step_id", ""),
+            action_id=request.get("action_id", ""),
+            params=params if isinstance(params, dict) else {},
+            mode=ExecutionMode(max(0, mode_val - 1)),
+        )
+
+        # Map proto TimeRange to SDK TimeRange
+        tr_data = request.get("time_range")
+        if tr_data and isinstance(tr_data, dict):
+            req.time_range = TimeRange(
+                start_epoch_ms=tr_data.get("start_epoch_ms", 0),
+                end_epoch_ms=tr_data.get("end_epoch_ms", 0),
+                timezone=tr_data.get("timezone", ""),
+                original_expression=tr_data.get("original_expression", ""),
+            )
+
+        resp = self._run_async(self._plugin.execute(req))
+
+        result_json = json.dumps(resp.output).encode() if resp.output else b"{}"
+        logs = resp.logs or []
+        return {
+            "result_json": result_json,
+            "logs": logs,
+            "success": True,
+        }
+
+    def HealthCheck(self, request, context):
+        """Handle PluginService.HealthCheck RPC."""
+        try:
+            self._run_async(self._plugin.health_check())
+            return {"healthy": True}
+        except Exception as e:
+            return {"healthy": False, "message": str(e)}
+
+    def ConfigUpdated(self, request, context):
+        """Handle PluginService.ConfigUpdated RPC."""
+        config = json.loads(request.get("config_json", b"{}"))
+        self._run_async(self._plugin.config_updated(config))
+        return {}
+
+
+def _param_to_dict(p: ParamSchema) -> dict:
+    return {
+        "name": p.name,
+        "type": p.type,
+        "required": p.required,
+        "description": p.description,
+    }
+
+
+def _build_generic_handler(adapter: _PluginServiceAdapter) -> grpc.GenericRpcHandler:
+    """Build a generic gRPC handler for PluginService when proto stubs are unavailable.
+
+    This registers unary-unary handlers for all 5 PluginService RPCs using JSON
+    codec serialization, matching the Go SDK's approach.
+    """
+    from grpc import unary_unary_rpc_method_handler
+
+    service_name = "mirastack.plugin.v1.PluginService"
+
+    method_handlers = {
+        f"/{service_name}/Info": unary_unary_rpc_method_handler(adapter.Info),
+        f"/{service_name}/GetSchema": unary_unary_rpc_method_handler(adapter.GetSchema),
+        f"/{service_name}/Execute": unary_unary_rpc_method_handler(adapter.Execute),
+        f"/{service_name}/HealthCheck": unary_unary_rpc_method_handler(adapter.HealthCheck),
+        f"/{service_name}/ConfigUpdated": unary_unary_rpc_method_handler(adapter.ConfigUpdated),
+    }
+
+    class _Handler(grpc.GenericRpcHandler):
+        def service(self, handler_call_details):
+            return method_handlers.get(handler_call_details.method)
+
+    return _Handler()
