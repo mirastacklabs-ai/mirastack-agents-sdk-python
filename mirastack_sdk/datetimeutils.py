@@ -141,3 +141,12 @@ def to_datetime(epoch_ms: int) -> datetime:
 def from_datetime(dt: datetime) -> int:
     """Convert a Python datetime to UTC epoch milliseconds."""
     return int(dt.timestamp() * 1000)
+
+
+def now_utc_ms() -> int:
+    """Return the current time as UTC epoch milliseconds.
+
+    Use this for default time windows instead of time.time() or
+    datetime.now() in plugin code.
+    """
+    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)

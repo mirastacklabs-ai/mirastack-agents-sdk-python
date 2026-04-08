@@ -6,6 +6,7 @@ and log events. Plugins NEVER access Kine or Valkey directly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -65,20 +66,9 @@ class EngineContext:
                 return {k: v for k, v in config.items() if k in keys}
             return dict(config)
 
-        # Cache miss — call engine
-        if self._stub is not None:
-            # Use generated stub
-            from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
-            req = plugin_pb2.GetConfigRequest(plugin_name=self._plugin_name)
-            resp = self._stub.GetConfig(req)
-            config = json.loads(resp.config_json) if resp.config_json else {}
-        else:
-            # Generic invocation without generated code
-            config = self._call_unary(
-                "/mirastack.plugin.v1.EngineService/GetConfig",
-                {"plugin_name": self._plugin_name},
-            )
-            config = json.loads(config.get("config_json", b"{}"))
+        # Cache miss — call engine (sync gRPC, offloaded to thread pool to
+        # avoid blocking the async event loop).
+        config = await asyncio.to_thread(self._fetch_config)
 
         # Update cache
         self._config_cache = config
@@ -90,6 +80,47 @@ class EngineContext:
 
     async def cache_get(self, key: str) -> str | None:
         """Retrieve a value from the engine's Valkey cache."""
+        return await asyncio.to_thread(self._cache_get_sync, key)
+
+    async def cache_set(self, key: str, value: str, ttl: timedelta | None = None) -> None:
+        """Store a value in the engine's Valkey cache."""
+        await asyncio.to_thread(self._cache_set_sync, key, value, ttl)
+
+    async def publish_result(self, execution_id: str, output: dict[str, str]) -> None:
+        """Send execution output back to the engine."""
+        await asyncio.to_thread(self._publish_result_sync, execution_id, output)
+
+    async def request_approval(self, execution_id: str, reason: str) -> bool:
+        """Pause execution and wait for human approval."""
+        return await asyncio.to_thread(self._request_approval_sync, execution_id, reason)
+
+    async def log_event(self, level: str, message: str, fields: dict[str, str] | None = None) -> None:
+        """Send a log entry to the engine's event stream."""
+        await asyncio.to_thread(self._log_event_sync, level, message, fields)
+
+    async def call_plugin(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
+        """Invoke another plugin through the engine and return its output."""
+        return await asyncio.to_thread(self._call_plugin_sync, target_plugin, params)
+
+    # ------------------------------------------------------------------
+    # Private synchronous helpers — executed via asyncio.to_thread() so
+    # that blocking gRPC calls do not stall the async event loop.
+    # ------------------------------------------------------------------
+
+    def _fetch_config(self) -> dict[str, str]:
+        if self._stub is not None:
+            from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
+            req = plugin_pb2.GetConfigRequest(plugin_name=self._plugin_name)
+            resp = self._stub.GetConfig(req)
+            return json.loads(resp.config_json) if resp.config_json else {}
+
+        resp = self._call_unary(
+            "/mirastack.plugin.v1.EngineService/GetConfig",
+            {"plugin_name": self._plugin_name},
+        )
+        return json.loads(resp.get("config_json", b"{}"))
+
+    def _cache_get_sync(self, key: str) -> str | None:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             resp = self._stub.CacheGet(plugin_pb2.CacheGetRequest(key=key))
@@ -103,8 +134,7 @@ class EngineContext:
             return resp.get("value", b"").decode()
         return None
 
-    async def cache_set(self, key: str, value: str, ttl: timedelta | None = None) -> None:
-        """Store a value in the engine's Valkey cache."""
+    def _cache_set_sync(self, key: str, value: str, ttl: timedelta | None = None) -> None:
         ttl_seconds = int(ttl.total_seconds()) if ttl else 0
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
@@ -118,8 +148,7 @@ class EngineContext:
             {"key": key, "value": value.encode(), "ttl_seconds": ttl_seconds},
         )
 
-    async def publish_result(self, execution_id: str, output: dict[str, str]) -> None:
-        """Send execution output back to the engine."""
+    def _publish_result_sync(self, execution_id: str, output: dict[str, str]) -> None:
         result_json = json.dumps(output).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
@@ -133,8 +162,7 @@ class EngineContext:
             {"execution_id": execution_id, "result_json": result_json, "success": True},
         )
 
-    async def request_approval(self, execution_id: str, reason: str) -> bool:
-        """Pause execution and wait for human approval."""
+    def _request_approval_sync(self, execution_id: str, reason: str) -> bool:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             resp = self._stub.RequestApproval(plugin_pb2.RequestApprovalRequest(
@@ -148,8 +176,7 @@ class EngineContext:
         )
         return resp.get("approved", False)
 
-    async def log_event(self, level: str, message: str, fields: dict[str, str] | None = None) -> None:
-        """Send a log entry to the engine's event stream."""
+    def _log_event_sync(self, level: str, message: str, fields: dict[str, str] | None = None) -> None:
         data_json = json.dumps(fields or {}).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
@@ -171,8 +198,7 @@ class EngineContext:
             },
         )
 
-    async def call_plugin(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
-        """Invoke another plugin through the engine and return its output."""
+    def _call_plugin_sync(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
         params_json = json.dumps(params).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
@@ -204,5 +230,15 @@ class EngineContext:
             self._channel = None
 
     def _call_unary(self, method: str, request: dict) -> dict:
-        """Invoke a unary gRPC method without generated stubs (dict↔dict via JSON codec)."""
-        return self._channel.unary_unary(method)(request)
+        """Invoke a unary gRPC method without generated stubs (dict↔dict via JSON codec).
+
+        The engine uses a JSON wire format (not protobuf), so we must supply
+        explicit serializer/deserializer functions that encode dicts as JSON
+        bytes and decode JSON bytes back to dicts.
+        """
+        callable_rpc = self._channel.unary_unary(
+            method,
+            request_serializer=lambda req: json.dumps(req).encode("utf-8"),
+            response_deserializer=lambda data: json.loads(data),
+        )
+        return callable_rpc(request)

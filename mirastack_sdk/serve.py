@@ -19,11 +19,13 @@ import logging
 import os
 import signal
 import sys
+import threading
 from concurrent import futures
 
 import grpc
 
 from mirastack_sdk.context import EngineContext
+from mirastack_sdk._otel import init_otel, get_tracer, otel_enabled
 from mirastack_sdk.plugin import (
     Plugin,
     ExecuteRequest,
@@ -58,8 +60,13 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     # Register the PluginService adapter that delegates to the Plugin interface.
     # We dynamically build a gRPC servicer that bridges sync gRPC calls
-    # to the async Plugin methods using an event loop.
+    # to the async Plugin methods using a dedicated event loop running in a
+    # background daemon thread.  asyncio.run_coroutine_threadsafe() requires
+    # the target loop to be actively running; without this thread the future
+    # returned by run_coroutine_threadsafe would never resolve.
     loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True, name="mirastack-async-loop")
+    loop_thread.start()
     adapter = _PluginServiceAdapter(plugin, loop)
 
     try:
@@ -73,6 +80,9 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
         server.add_generic_rpc_handlers([handler])
 
     port = server.add_insecure_port(listen_addr)
+
+    # Initialize OpenTelemetry (no-op when MIRASTACK_OTEL_ENABLED != "true")
+    otel_shutdown = init_otel(info.name)
 
     # Write the actual port to stdout for the engine to discover
     print(f"MIRASTACK_PLUGIN_PORT={port}", flush=True)
@@ -95,12 +105,15 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     # Handle shutdown signals
     def _signal_handler(sig: int, frame: object) -> None:
         logger.info("Shutting down plugin (signal %d)", sig)
+        otel_shutdown()
         server.stop(grace=5)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     server.wait_for_termination()
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=5)
     loop.close()
 
 
@@ -182,6 +195,47 @@ class _PluginServiceAdapter:
 
     def Execute(self, request, context):
         """Handle PluginService.Execute RPC."""
+        tracer = get_tracer()
+        action_id = request.get("action_id", "")
+        execution_id = request.get("execution_id", "")
+
+        span_ctx = None
+        span = None
+        if tracer is not None:
+            from opentelemetry import trace as _trace
+
+            span_ctx = tracer.start_span(
+                "plugin.execute",
+                kind=_trace.SpanKind.INTERNAL,
+                attributes={
+                    "plugin.action": action_id,
+                    "plugin.execution_id": execution_id,
+                },
+            )
+            span = span_ctx
+            context_api = _trace.context_api
+            # Activate span in current context
+            token = context_api.attach(  # noqa: F841
+                _trace.set_span_in_context(span)
+            )
+
+        try:
+            result = self._execute_inner(request, context)
+            if span is not None:
+                span.set_attribute("plugin.success", True)
+            return result
+        except Exception as exc:
+            if span is not None:
+                span.record_exception(exc)
+                from opentelemetry.trace import StatusCode
+
+                span.set_status(StatusCode.ERROR, str(exc))
+            raise
+        finally:
+            if span is not None:
+                span.end()
+
+    def _execute_inner(self, request, context):
         params = json.loads(request.get("params_json", b"{}"))
         mode_val = request.get("mode", 1)
 
@@ -229,7 +283,13 @@ class _PluginServiceAdapter:
 
     def ConfigUpdated(self, request, context):
         """Handle PluginService.ConfigUpdated RPC."""
-        config = json.loads(request.get("config_json", b"{}"))
+        # The engine sends config as a map[string]string with JSON key "config"
+        # (see pluginv1.ConfigUpdatedRequest in the Go SDK).  When transmitted
+        # via the JSON codec the field arrives as a plain dict, not as bytes
+        # requiring json.loads().
+        config = request.get("config", {})
+        if isinstance(config, bytes):
+            config = json.loads(config)
         self._run_async(self._plugin.config_updated(config))
         return {}
 
