@@ -4,11 +4,27 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mirastack-agents-sdk"
-version = "0.1.0"
-description = "Python SDK for building MIRASTACK agents (AGPL v3)"
+version = "1.0.1"
+description = "Python SDK for building MIRASTACK agents — agentic workflow automation for platform engineering"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12"
+authors = [
+    { name = "MIRASTACK Labs", email = "oss@mirastacklabs.ai" },
+]
+keywords = ["mirastack", "agents", "sdk", "grpc", "platform-engineering", "devops", "observability", "agentic", "workflow"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
     "grpcio>=1.72.0",
     "grpcio-tools>=1.72.0",
@@ -31,3 +47,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["mirastack_sdk"]
+
+[project.urls]
+Homepage = "https://mirastacklabs.ai"
+Documentation = "https://docs.mirastacklabs.ai/sdk/python"
+Repository = "https://github.com/mirastacklabs-ai/mirastack-agents-sdk-python"
+Issues = "https://github.com/mirastacklabs-ai/mirastack-agents-sdk-python/issues"
+Changelog = "https://github.com/mirastacklabs-ai/mirastack-agents-sdk-python/releases"
