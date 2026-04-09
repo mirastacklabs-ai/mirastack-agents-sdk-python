@@ -107,31 +107,22 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     logger.info("Plugin serving: %s v%s on port %d", info.name, info.version, port)
 
-    # Self-register with the engine if connected.
+    # Self-register with the engine in a background thread with exponential
+    # backoff.  Registration must not block the gRPC server — the plugin must
+    # be ready to accept Execute / HealthCheck calls immediately.
+    # In container and Kubernetes environments every replica should set
+    # MIRASTACK_PLUGIN_ADVERTISE_ADDR to the Service name (e.g.
+    # "agent-query-vmetrics:50051") so the engine dials the infrastructure
+    # load-balancer, not an ephemeral pod/container address.
     if engine_ctx is not None:
         advertise_addr = _resolve_advertise_addr(port)
-        try:
-            resp = engine_ctx.register_self(
-                grpc_addr=advertise_addr,
-                plugin_type=1,  # PluginTypeAgent
-                version=info.version,
-                instance_id=instance_id,
-            )
-            if resp.get("success"):
-                logger.info(
-                    "Self-registered with engine: plugin_id=%s addr=%s",
-                    resp.get("plugin_id", ""),
-                    advertise_addr,
-                )
-            else:
-                logger.warning(
-                    "Self-registration rejected: %s", resp.get("error", "unknown")
-                )
-        except Exception:
-            logger.warning(
-                "Self-registration with engine failed, engine may register via probe",
-                exc_info=True,
-            )
+        reg_thread = threading.Thread(
+            target=_register_with_retry,
+            args=(engine_ctx, advertise_addr, 1, info.version, instance_id),
+            daemon=True,
+            name="mirastack-register",
+        )
+        reg_thread.start()
 
     # Handle shutdown signals
     def _signal_handler(sig: int, frame: object) -> None:
@@ -394,14 +385,79 @@ def _build_generic_handler(adapter: _PluginServiceAdapter) -> grpc.GenericRpcHan
 
 
 def _resolve_advertise_addr(bound_port: int) -> str:
-    """Determine the externally reachable address for this plugin.
+    """Determine the address the engine should use to reach this plugin via gRPC.
 
     Order of precedence:
-        1. MIRASTACK_PLUGIN_ADVERTISE_ADDR env var (explicit, e.g. "plugin-host:50051")
-        2. socket.gethostname() + bound port (best-effort in containerized environments)
+
+        1. ``MIRASTACK_PLUGIN_ADVERTISE_ADDR`` — explicit, always wins.
+           In containerized (Docker/Podman) and Kubernetes deployments this
+           MUST be set to the Service DNS name (e.g.
+           ``agent-query-vmetrics:50051`` for Compose or
+           ``agent-query-vmetrics.ns.svc.cluster.local:50051`` for K8s).
+           For horizontal scaling every replica advertises the same Service
+           address; the infrastructure (kube-proxy, Compose DNS round-robin)
+           handles load-balancing across pods/containers.
+        2. ``socket.gethostname()`` + bound port — suitable for native
+           (bare-metal / VM) installs where the OS hostname is DNS-resolvable.
     """
     addr = os.environ.get("MIRASTACK_PLUGIN_ADVERTISE_ADDR", "")
     if addr:
         return addr
     hostname = socket.gethostname() or "localhost"
     return f"{hostname}:{bound_port}"
+
+
+def _register_with_retry(
+    engine_ctx: EngineContext,
+    advertise_addr: str,
+    plugin_type: int,
+    version: str,
+    instance_id: str,
+) -> None:
+    """Attempt self-registration with exponential backoff.
+
+    Backoff schedule: 2 s → 4 s → 8 s → 16 s → 30 s (cap), up to 10 attempts.
+    Runs in a daemon thread so the gRPC server is not blocked.
+    """
+    import time as _time
+
+    max_attempts = 10
+    max_backoff = 30.0
+    backoff = 2.0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = engine_ctx.register_self(
+                grpc_addr=advertise_addr,
+                plugin_type=plugin_type,
+                version=version,
+                instance_id=instance_id,
+            )
+            if resp.get("success"):
+                logger.info(
+                    "Self-registered with engine: plugin_id=%s addr=%s",
+                    resp.get("plugin_id", ""),
+                    advertise_addr,
+                )
+                return
+            logger.warning(
+                "Self-registration rejected: %s", resp.get("error", "unknown")
+            )
+        except Exception:
+            if attempt == max_attempts:
+                logger.error(
+                    "Self-registration exhausted all retries (%d) — plugin will "
+                    "not be discoverable by the engine",
+                    max_attempts,
+                    exc_info=True,
+                )
+                return
+            logger.warning(
+                "Self-registration attempt %d failed, retrying in %.0fs",
+                attempt,
+                backoff,
+                exc_info=True,
+            )
+
+        _time.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
