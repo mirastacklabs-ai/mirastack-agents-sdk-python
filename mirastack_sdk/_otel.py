@@ -19,7 +19,8 @@ logger = logging.getLogger("mirastack_sdk.otel")
 TRACER_NAME = "mirastack.plugin"
 
 # Sentinel that indicates OTel is not active
-_NOOP_SHUTDOWN: Callable[[], None] = lambda: None
+def _NOOP_SHUTDOWN() -> None:
+    pass
 
 
 def otel_enabled() -> bool:

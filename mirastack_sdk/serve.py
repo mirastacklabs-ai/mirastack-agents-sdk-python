@@ -27,11 +27,10 @@ from concurrent import futures
 import grpc
 
 from mirastack_sdk.context import EngineContext
-from mirastack_sdk._otel import init_otel, get_tracer, otel_enabled
+from mirastack_sdk._otel import init_otel, get_tracer
 from mirastack_sdk.plugin import (
     Plugin,
     ExecuteRequest,
-    ExecuteResponse,
     ExecutionMode,
     ParamSchema,
     TimeRange,
