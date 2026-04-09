@@ -20,23 +20,23 @@ from mirastack_sdk.datetimeutils import (
 
 
 # 2026-04-02T12:30:00Z in epoch ms
-TEST_MS = 1774973400000
+TEST_MS = 1775133000000
 
 
 def test_format_epoch_seconds():
-    assert format_epoch_seconds(TEST_MS) == "1774973400.000"
+    assert format_epoch_seconds(TEST_MS) == "1775133000.000"
 
 
 def test_format_epoch_millis():
-    assert format_epoch_millis(TEST_MS) == "1774973400000"
+    assert format_epoch_millis(TEST_MS) == "1775133000000"
 
 
 def test_format_epoch_micros():
-    assert format_epoch_micros(TEST_MS) == "1774973400000000"
+    assert format_epoch_micros(TEST_MS) == "1775133000000000"
 
 
 def test_format_epoch_nanos():
-    assert format_epoch_nanos(TEST_MS) == "1774973400000000000"
+    assert format_epoch_nanos(TEST_MS) == "1775133000000000000"
 
 
 def test_format_rfc3339():

@@ -11,6 +11,7 @@ import json
 import os
 import time
 from datetime import timedelta
+from typing import Any
 
 import grpc
 
@@ -36,11 +37,12 @@ class EngineContext:
         )
 
         # Attempt to import generated stubs; fall back to generic invocation.
+        self._stub: Any = None
         try:
             from mirastack_sdk.gen import plugin_pb2_grpc  # type: ignore[import-untyped]
             self._stub = plugin_pb2_grpc.EngineServiceStub(self._channel)
         except ImportError:
-            self._stub = None
+            pass
 
     async def get_config(self, keys: list[str] | None = None) -> dict[str, str]:
         """Retrieve configuration values from the engine's settings store.
@@ -227,7 +229,7 @@ class EngineContext:
         """Clean up the gRPC channel."""
         if self._channel is not None:
             self._channel.close()
-            self._channel = None
+            self._channel = None  # type: ignore[assignment]
 
     def register_self(
         self,
