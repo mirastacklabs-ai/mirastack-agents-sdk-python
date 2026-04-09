@@ -18,8 +18,10 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
+import uuid
 from concurrent import futures
 
 import grpc
@@ -55,6 +57,9 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
         sys.exit(1)
 
     listen_addr = os.environ.get("MIRASTACK_PLUGIN_ADDR", "[::]:0")
+    # Normalize bare ":port" to "0.0.0.0:port" — grpcio 1.72+ rejects empty host.
+    if listen_addr.startswith(":"):
+        listen_addr = "0.0.0.0" + listen_addr
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
 
@@ -90,6 +95,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     # Connect to engine for EngineContext callbacks (if address provided)
     engine_addr = os.environ.get("MIRASTACK_ENGINE_ADDR", "")
     engine_ctx: EngineContext | None = None
+    instance_id = str(uuid.uuid4())
     if engine_addr:
         try:
             engine_ctx = EngineContext(engine_addr, info.name)
@@ -102,9 +108,42 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     logger.info("Plugin serving: %s v%s on port %d", info.name, info.version, port)
 
+    # Self-register with the engine if connected.
+    if engine_ctx is not None:
+        advertise_addr = _resolve_advertise_addr(port)
+        try:
+            resp = engine_ctx.register_self(
+                grpc_addr=advertise_addr,
+                plugin_type=1,  # PluginTypeAgent
+                version=info.version,
+                instance_id=instance_id,
+            )
+            if resp.get("success"):
+                logger.info(
+                    "Self-registered with engine: plugin_id=%s addr=%s",
+                    resp.get("plugin_id", ""),
+                    advertise_addr,
+                )
+            else:
+                logger.warning(
+                    "Self-registration rejected: %s", resp.get("error", "unknown")
+                )
+        except Exception:
+            logger.warning(
+                "Self-registration with engine failed, engine may register via probe",
+                exc_info=True,
+            )
+
     # Handle shutdown signals
     def _signal_handler(sig: int, frame: object) -> None:
         logger.info("Shutting down plugin (signal %d)", sig)
+        # Deregister from engine before stopping
+        if engine_ctx is not None:
+            try:
+                engine_ctx.deregister_self(instance_id)
+                logger.info("Deregistered from engine")
+            except Exception:
+                logger.warning("Deregistration from engine failed", exc_info=True)
         otel_shutdown()
         server.stop(grace=5)
 
@@ -353,3 +392,17 @@ def _build_generic_handler(adapter: _PluginServiceAdapter) -> grpc.GenericRpcHan
             return method_handlers.get(handler_call_details.method)
 
     return _Handler()
+
+
+def _resolve_advertise_addr(bound_port: int) -> str:
+    """Determine the externally reachable address for this plugin.
+
+    Order of precedence:
+        1. MIRASTACK_PLUGIN_ADVERTISE_ADDR env var (explicit, e.g. "plugin-host:50051")
+        2. socket.gethostname() + bound port (best-effort in containerized environments)
+    """
+    addr = os.environ.get("MIRASTACK_PLUGIN_ADVERTISE_ADDR", "")
+    if addr:
+        return addr
+    hostname = socket.gethostname() or "localhost"
+    return f"{hostname}:{bound_port}"

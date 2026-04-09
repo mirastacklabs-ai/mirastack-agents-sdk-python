@@ -229,6 +229,52 @@ class EngineContext:
             self._channel.close()
             self._channel = None
 
+    def register_self(
+        self,
+        grpc_addr: str,
+        plugin_type: int,
+        version: str,
+        instance_id: str,
+    ) -> dict:
+        """Announce this plugin to the engine so it joins the active registry.
+
+        Args:
+            grpc_addr: Externally reachable address (e.g. "plugin-host:50051").
+            plugin_type: 1=Agent, 2=Provider, 3=Connector.
+            version: Semantic version of the plugin.
+            instance_id: Unique instance identifier for this process.
+
+        Returns:
+            Response dict with 'success', 'plugin_id', and optional 'error'.
+        """
+        return self._call_unary(
+            "/mirastack.plugin.v1.EngineService/RegisterPlugin",
+            {
+                "name": self._plugin_name,
+                "version": version,
+                "grpc_addr": grpc_addr,
+                "plugin_type": plugin_type,
+                "instance_id": instance_id,
+            },
+        )
+
+    def deregister_self(self, instance_id: str) -> dict:
+        """Tell the engine this plugin is shutting down.
+
+        Args:
+            instance_id: The same instance identifier passed during registration.
+
+        Returns:
+            Response dict with 'acknowledged' boolean.
+        """
+        return self._call_unary(
+            "/mirastack.plugin.v1.EngineService/DeregisterPlugin",
+            {
+                "name": self._plugin_name,
+                "instance_id": instance_id,
+            },
+        )
+
     def _call_unary(self, method: str, request: dict) -> dict:
         """Invoke a unary gRPC method without generated stubs (dict↔dict via JSON codec).
 

@@ -28,3 +28,6 @@ dev = [
     "mypy>=1.13",
     "grpc-stubs>=1.53",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mirastack_sdk"]
