@@ -189,6 +189,11 @@ class EngineServiceStub:
             request_serializer=_json_request_serializer,
             response_deserializer=_json_response_deserializer(plugin_pb2.CallPluginResponse),
         )
+        self.Heartbeat = channel.unary_unary(
+            "/mirastack.plugin.v1.EngineService/Heartbeat",
+            request_serializer=_json_request_serializer,
+            response_deserializer=_json_response_deserializer(plugin_pb2.HeartbeatResponse),
+        )
 
 
 # ---------------------------------------------------------------------------

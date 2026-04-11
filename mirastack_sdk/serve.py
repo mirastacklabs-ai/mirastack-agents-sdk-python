@@ -509,36 +509,70 @@ def _maintain_registration(
             heartbeat_interval,
         )
 
-    # Phase 2: Persistent heartbeat loop — re-register periodically.
+    # Phase 2: Persistent heartbeat loop.
+    # Sends a lightweight Heartbeat RPC instead of full RegisterPlugin.
+    # If the engine responds with re_register_required (e.g. engine restarted
+    # and lost in-memory state), the SDK performs a full register_self to
+    # re-establish the plugin in the engine's registry.
+    # If the engine returns a non-zero heartbeat_interval_seconds, the SDK
+    # adopts it (unless overridden by env var).
+    env_override = os.environ.get("MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL", "") != ""
     consecutive_failures = 0
     while not stop_event.wait(timeout=heartbeat_interval):
         try:
-            resp = engine_ctx.register_self(
-                grpc_addr=advertise_addr,
-                plugin_type=plugin_type,
-                version=version,
-                instance_id=instance_id,
-            )
-            if resp.get("success"):
-                if consecutive_failures > 0:
+            resp = engine_ctx.heartbeat(instance_id=instance_id)
+
+            # Adopt engine-recommended heartbeat interval (if no env override).
+            engine_interval = resp.get("heartbeat_interval_seconds", 0)
+            if not env_override and engine_interval and engine_interval > 0:
+                new_interval = float(engine_interval)
+                if new_interval != heartbeat_interval:
+                    heartbeat_interval = new_interval
                     logger.info(
-                        "Registration heartbeat recovered after %d failures",
-                        consecutive_failures,
+                        "Adopted engine-recommended heartbeat interval: %.0fs",
+                        heartbeat_interval,
                     )
-                consecutive_failures = 0
-            else:
-                consecutive_failures += 1
-                if consecutive_failures == 1 or consecutive_failures % 10 == 0:
+
+            if resp.get("re_register_required"):
+                logger.info("Engine requested re-registration, performing full RegisterPlugin")
+                try:
+                    reg_resp = engine_ctx.register_self(
+                        grpc_addr=advertise_addr,
+                        plugin_type=plugin_type,
+                        version=version,
+                        instance_id=instance_id,
+                    )
+                    if reg_resp.get("success"):
+                        logger.info(
+                            "Re-registered with engine: plugin_id=%s",
+                            reg_resp.get("plugin_id", ""),
+                        )
+                    else:
+                        consecutive_failures += 1
+                        logger.warning(
+                            "Re-registration rejected: %s",
+                            reg_resp.get("error", "unknown"),
+                        )
+                        continue
+                except Exception:
+                    consecutive_failures += 1
                     logger.warning(
-                        "Registration heartbeat rejected: %s (failures=%d)",
-                        resp.get("error", "unknown"),
-                        consecutive_failures,
+                        "Re-registration after heartbeat failed",
+                        exc_info=True,
                     )
+                    continue
+
+            if consecutive_failures > 0:
+                logger.info(
+                    "Heartbeat recovered after %d failures",
+                    consecutive_failures,
+                )
+            consecutive_failures = 0
         except Exception:
             consecutive_failures += 1
             if consecutive_failures == 1 or consecutive_failures % 10 == 0:
                 logger.warning(
-                    "Registration heartbeat failed (failures=%d)",
+                    "Heartbeat failed (failures=%d)",
                     consecutive_failures,
                     exc_info=True,
                 )

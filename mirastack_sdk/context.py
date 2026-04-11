@@ -284,6 +284,28 @@ class EngineContext:
             },
         )
 
+    def heartbeat(self, instance_id: str) -> dict:
+        """Send a lightweight liveness signal to the engine.
+
+        Unlike register_self, this does NOT trigger a full registration handshake.
+        If the engine doesn't recognize this plugin (e.g. after engine restart),
+        the response will have 're_register_required' set to True.
+
+        Args:
+            instance_id: The instance identifier for this process.
+
+        Returns:
+            Response dict with 'acknowledged', 're_register_required',
+            and 'heartbeat_interval_seconds'.
+        """
+        return self._call_unary(
+            "/mirastack.plugin.v1.EngineService/Heartbeat",
+            {
+                "name": self._plugin_name,
+                "instance_id": instance_id,
+            },
+        )
+
     def _call_unary(self, method: str, request: dict) -> dict:
         """Invoke a unary gRPC method without generated stubs (dict↔dict via JSON codec).
 

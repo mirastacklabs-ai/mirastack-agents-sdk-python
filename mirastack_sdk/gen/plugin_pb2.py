@@ -426,3 +426,42 @@ class CallPluginResponse(_Msg):
             "error": self.error,
             "duration_ms": self.duration_ms,
         }
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat Messages
+# ---------------------------------------------------------------------------
+
+class HeartbeatRequest(_Msg):
+    def __init__(
+        self,
+        name: str = "",
+        instance_id: str = "",
+    ) -> None:
+        self.name = name
+        self.instance_id = instance_id
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "instance_id": self.instance_id,
+        }
+
+
+class HeartbeatResponse(_Msg):
+    def __init__(
+        self,
+        acknowledged: bool = False,
+        re_register_required: bool = False,
+        heartbeat_interval_seconds: int = 0,
+    ) -> None:
+        self.acknowledged = acknowledged
+        self.re_register_required = re_register_required
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "acknowledged": self.acknowledged,
+            "re_register_required": self.re_register_required,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
+        }
