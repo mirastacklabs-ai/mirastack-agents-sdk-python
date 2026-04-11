@@ -55,6 +55,16 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
         logger.fatal("plugin.info() must not return None")
         sys.exit(1)
 
+    # ── Quality gate ──────────────────────────────────────────────────
+    from mirastack_sdk.validate import validate_plugin  # noqa: E402
+
+    gate_errors = validate_plugin(info)
+    if gate_errors:
+        logger.fatal(
+            "Quality gate failed:\n  - %s", "\n  - ".join(gate_errors)
+        )
+        sys.exit(1)
+
     listen_addr = os.environ.get("MIRASTACK_PLUGIN_ADDR", "[::]:0")
     # Normalize bare ":port" to "0.0.0.0:port" — grpcio 1.72+ rejects empty host.
     if listen_addr.startswith(":"):
@@ -107,18 +117,22 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     logger.info("Plugin serving: %s v%s on port %d", info.name, info.version, port)
 
-    # Self-register with the engine in a background thread with exponential
-    # backoff.  Registration must not block the gRPC server — the plugin must
-    # be ready to accept Execute / HealthCheck calls immediately.
+    # Maintain persistent registration with the engine in a background thread.
+    # Registration must not block the gRPC server — the plugin must be ready to
+    # accept Execute / HealthCheck calls immediately.  After initial
+    # registration, the thread enters a heartbeat loop that periodically
+    # re-registers.  This ensures the plugin survives engine restarts: when the
+    # engine comes back, the next heartbeat re-establishes the registration.
     # In container and Kubernetes environments every replica should set
     # MIRASTACK_PLUGIN_ADVERTISE_ADDR to the Service name (e.g.
     # "agent-query-vmetrics:50051") so the engine dials the infrastructure
     # load-balancer, not an ephemeral pod/container address.
+    stop_event = threading.Event()
     if engine_ctx is not None:
         advertise_addr = _resolve_advertise_addr(port)
         reg_thread = threading.Thread(
-            target=_register_with_retry,
-            args=(engine_ctx, advertise_addr, 1, info.version, instance_id),
+            target=_maintain_registration,
+            args=(engine_ctx, advertise_addr, 1, info.version, instance_id, stop_event),
             daemon=True,
             name="mirastack-register",
         )
@@ -127,6 +141,8 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     # Handle shutdown signals
     def _signal_handler(sig: int, frame: object) -> None:
         logger.info("Shutting down plugin (signal %d)", sig)
+        # Stop the registration heartbeat loop.
+        stop_event.set()
         # Deregister from engine before stopping
         if engine_ctx is not None:
             try:
@@ -407,16 +423,23 @@ def _resolve_advertise_addr(bound_port: int) -> str:
     return f"{hostname}:{bound_port}"
 
 
-def _register_with_retry(
+def _maintain_registration(
     engine_ctx: EngineContext,
     advertise_addr: str,
     plugin_type: int,
     version: str,
     instance_id: str,
+    stop_event: threading.Event,
 ) -> None:
-    """Attempt self-registration with exponential backoff.
+    """Perform initial registration then maintain a persistent heartbeat.
 
-    Backoff schedule: 2 s → 4 s → 8 s → 16 s → 30 s (cap), up to 10 attempts.
+    Phase 1: Initial registration with exponential backoff (2 s → 30 s cap,
+    up to 10 attempts).
+    Phase 2: Persistent heartbeat loop that re-registers every interval
+    (default 30 s, configurable via MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL).
+
+    This ensures the plugin survives engine restarts: when the engine comes
+    back, the next heartbeat re-establishes the registration.
     Runs in a daemon thread so the gRPC server is not blocked.
     """
     import time as _time
@@ -425,7 +448,17 @@ def _register_with_retry(
     max_backoff = 30.0
     backoff = 2.0
 
+    heartbeat_interval_str = os.environ.get("MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL", "30")
+    try:
+        heartbeat_interval = max(1.0, float(heartbeat_interval_str))
+    except ValueError:
+        heartbeat_interval = 30.0
+
+    # Phase 1: Initial registration with bounded retries.
+    registered = False
     for attempt in range(1, max_attempts + 1):
+        if stop_event.is_set():
+            return
         try:
             resp = engine_ctx.register_self(
                 grpc_addr=advertise_addr,
@@ -439,19 +472,20 @@ def _register_with_retry(
                     resp.get("plugin_id", ""),
                     advertise_addr,
                 )
-                return
+                registered = True
+                break
             logger.warning(
                 "Self-registration rejected: %s", resp.get("error", "unknown")
             )
         except Exception:
             if attempt == max_attempts:
                 logger.error(
-                    "Self-registration exhausted all retries (%d) — plugin will "
-                    "not be discoverable by the engine",
+                    "Initial registration exhausted all retries (%d) — "
+                    "entering heartbeat mode, will keep trying",
                     max_attempts,
                     exc_info=True,
                 )
-                return
+                break
             logger.warning(
                 "Self-registration attempt %d failed, retrying in %.0fs",
                 attempt,
@@ -459,5 +493,46 @@ def _register_with_retry(
                 exc_info=True,
             )
 
-        _time.sleep(backoff)
+        if stop_event.wait(timeout=backoff):
+            return
         backoff = min(backoff * 2, max_backoff)
+
+    if registered:
+        logger.info(
+            "Entering registration heartbeat loop (interval=%.0fs)",
+            heartbeat_interval,
+        )
+
+    # Phase 2: Persistent heartbeat loop — re-register periodically.
+    consecutive_failures = 0
+    while not stop_event.wait(timeout=heartbeat_interval):
+        try:
+            resp = engine_ctx.register_self(
+                grpc_addr=advertise_addr,
+                plugin_type=plugin_type,
+                version=version,
+                instance_id=instance_id,
+            )
+            if resp.get("success"):
+                if consecutive_failures > 0:
+                    logger.info(
+                        "Registration heartbeat recovered after %d failures",
+                        consecutive_failures,
+                    )
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if consecutive_failures == 1 or consecutive_failures % 10 == 0:
+                    logger.warning(
+                        "Registration heartbeat rejected: %s (failures=%d)",
+                        resp.get("error", "unknown"),
+                        consecutive_failures,
+                    )
+        except Exception:
+            consecutive_failures += 1
+            if consecutive_failures == 1 or consecutive_failures % 10 == 0:
+                logger.warning(
+                    "Registration heartbeat failed (failures=%d)",
+                    consecutive_failures,
+                    exc_info=True,
+                )
