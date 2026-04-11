@@ -70,7 +70,15 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     if listen_addr.startswith(":"):
         listen_addr = "0.0.0.0" + listen_addr
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=max_workers),
+        options=[
+            ("grpc.keepalive_time_ms", 30000),           # send keepalive ping every 30s
+            ("grpc.keepalive_timeout_ms", 10000),        # wait 10s for ping ack
+            ("grpc.keepalive_permit_without_calls", 1),  # allow pings with no active RPCs
+            ("grpc.http2.min_recv_ping_interval_without_data_in_seconds", 20),  # allow client pings every 20s
+        ],
+    )
 
     # Register the PluginService adapter that delegates to the Plugin interface.
     # We dynamically build a gRPC servicer that bridges sync gRPC calls

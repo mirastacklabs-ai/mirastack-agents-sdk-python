@@ -27,7 +27,14 @@ class EngineContext:
             raise ValueError("engine_addr is required")
         self._engine_addr = engine_addr
         self._plugin_name = plugin_name
-        self._channel = grpc.insecure_channel(engine_addr)
+        self._channel = grpc.insecure_channel(
+            engine_addr,
+            options=[
+                ("grpc.keepalive_time_ms", 30000),
+                ("grpc.keepalive_timeout_ms", 10000),
+                ("grpc.keepalive_permit_without_calls", 1),
+            ],
+        )
 
         # Config cache
         self._config_cache: dict[str, str] | None = None
