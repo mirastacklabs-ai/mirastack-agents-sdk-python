@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from mirastack_sdk.plugin import (
     Action,
     ConfigParam,

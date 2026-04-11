@@ -442,8 +442,6 @@ def _maintain_registration(
     back, the next heartbeat re-establishes the registration.
     Runs in a daemon thread so the gRPC server is not blocked.
     """
-    import time as _time
-
     max_attempts = 10
     max_backoff = 30.0
     backoff = 2.0
