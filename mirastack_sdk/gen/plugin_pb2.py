@@ -95,6 +95,33 @@ class GetSchemaResponse(_Msg):
         }
 
 
+class TimeRange(_Msg):
+    """Pre-parsed, absolute UTC time range delivered by the engine."""
+
+    def __init__(
+        self,
+        start_epoch_ms: int = 0,
+        end_epoch_ms: int = 0,
+        timezone: str = "",
+        original_expression: str = "",
+    ) -> None:
+        self.start_epoch_ms = start_epoch_ms
+        self.end_epoch_ms = end_epoch_ms
+        self.timezone = timezone
+        self.original_expression = original_expression
+
+    def _to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "start_epoch_ms": self.start_epoch_ms,
+            "end_epoch_ms": self.end_epoch_ms,
+        }
+        if self.timezone:
+            d["timezone"] = self.timezone
+        if self.original_expression:
+            d["original_expression"] = self.original_expression
+        return d
+
+
 class ExecuteRequest(_Msg):
     def __init__(
         self,
@@ -391,19 +418,24 @@ class CallPluginRequest(_Msg):
         target_plugin: str = "",
         params_json: bytes = b"{}",
         timeout_seconds: int = 0,
+        time_range: dict[str, Any] | None = None,
     ) -> None:
         self.caller_plugin = caller_plugin
         self.target_plugin = target_plugin
         self.params_json = params_json
         self.timeout_seconds = timeout_seconds
+        self.time_range = time_range
 
     def _to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "caller_plugin": self.caller_plugin,
             "target_plugin": self.target_plugin,
             "params_json": self.params_json.decode() if isinstance(self.params_json, bytes) else self.params_json,
             "timeout_seconds": self.timeout_seconds,
         }
+        if self.time_range:
+            d["time_range"] = self.time_range
+        return d
 
 
 class CallPluginResponse(_Msg):

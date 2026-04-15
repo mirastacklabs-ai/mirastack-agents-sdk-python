@@ -243,19 +243,12 @@ class EngineContext:
         params_json = json.dumps(params).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
-            kwargs: dict = {
-                "caller_plugin": self._plugin_name,
-                "target_plugin": target_plugin,
-                "params_json": params_json,
-            }
-            if time_range is not None:
-                kwargs["time_range"] = plugin_pb2.TimeRange(
-                    start_epoch_ms=time_range.get("start_epoch_ms", 0),
-                    end_epoch_ms=time_range.get("end_epoch_ms", 0),
-                    timezone=time_range.get("timezone", ""),
-                    original_expression=time_range.get("original_expression", ""),
-                )
-            resp = self._stub.CallPlugin(plugin_pb2.CallPluginRequest(**kwargs))
+            resp = self._stub.CallPlugin(plugin_pb2.CallPluginRequest(
+                caller_plugin=self._plugin_name,
+                target_plugin=target_plugin,
+                params_json=params_json,
+                time_range=time_range,
+            ))
             if not resp.success:
                 raise RuntimeError(f"Plugin {target_plugin!r} returned error: {resp.error}")
             return json.loads(resp.result_json)
