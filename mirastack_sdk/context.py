@@ -109,7 +109,34 @@ class EngineContext:
 
     async def call_plugin(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
         """Invoke another plugin through the engine and return its output."""
-        return await asyncio.to_thread(self._call_plugin_sync, target_plugin, params)
+        return await self.call_plugin_with_time_range(target_plugin, params, None)
+
+    async def call_plugin_with_time_range(
+        self,
+        target_plugin: str,
+        params: dict[str, str],
+        time_range: dict | None = None,
+    ) -> dict[str, str]:
+        """Invoke another plugin, propagating the given TimeRange.
+
+        Use this when orchestrating agent-to-agent calls from within an
+        execute() handler to prevent time drift. Pass the time_range dict
+        from the original ExecuteRequest to maintain absolute time context.
+
+        Args:
+            target_plugin: Name of the plugin to invoke.
+            params: Key-value parameters for the target plugin.
+            time_range: Optional dict with start_epoch_ms, end_epoch_ms,
+                        timezone, original_expression. Pass
+                        ``dataclasses.asdict(req.time_range)`` from the
+                        incoming ExecuteRequest.
+
+        Returns:
+            Dictionary of output key-value pairs from the target plugin.
+        """
+        return await asyncio.to_thread(
+            self._call_plugin_with_time_range_sync, target_plugin, params, time_range,
+        )
 
     # ------------------------------------------------------------------
     # Private synchronous helpers — executed via asyncio.to_thread() so
@@ -207,26 +234,42 @@ class EngineContext:
             },
         )
 
-    def _call_plugin_sync(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
+    def _call_plugin_with_time_range_sync(
+        self,
+        target_plugin: str,
+        params: dict[str, str],
+        time_range: dict | None = None,
+    ) -> dict[str, str]:
         params_json = json.dumps(params).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
-            resp = self._stub.CallPlugin(plugin_pb2.CallPluginRequest(
-                caller_plugin=self._plugin_name,
-                target_plugin=target_plugin,
-                params_json=params_json,
-            ))
+            kwargs: dict = {
+                "caller_plugin": self._plugin_name,
+                "target_plugin": target_plugin,
+                "params_json": params_json,
+            }
+            if time_range is not None:
+                kwargs["time_range"] = plugin_pb2.TimeRange(
+                    start_epoch_ms=time_range.get("start_epoch_ms", 0),
+                    end_epoch_ms=time_range.get("end_epoch_ms", 0),
+                    timezone=time_range.get("timezone", ""),
+                    original_expression=time_range.get("original_expression", ""),
+                )
+            resp = self._stub.CallPlugin(plugin_pb2.CallPluginRequest(**kwargs))
             if not resp.success:
                 raise RuntimeError(f"Plugin {target_plugin!r} returned error: {resp.error}")
             return json.loads(resp.result_json)
 
+        request: dict = {
+            "caller_plugin": self._plugin_name,
+            "target_plugin": target_plugin,
+            "params_json": params_json,
+        }
+        if time_range is not None:
+            request["time_range"] = time_range
         resp = self._call_unary(
             "/mirastack.plugin.v1.EngineService/CallPlugin",
-            {
-                "caller_plugin": self._plugin_name,
-                "target_plugin": target_plugin,
-                "params_json": params_json,
-            },
+            request,
         )
         if not resp.get("success"):
             raise RuntimeError(f"Plugin {target_plugin!r} returned error: {resp.get('error', '')}")
