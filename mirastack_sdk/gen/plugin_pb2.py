@@ -288,6 +288,40 @@ class CacheGetResponse(_Msg):
         }
 
 
+class CacheGetBatchRequest(_Msg):
+    """Batch cache lookup (MGET). Engine namespaces all keys under the
+    caller's tenant scope and rejects cross-tenant access."""
+
+    def __init__(self, keys: list[str] | None = None, tenant_id: str = "") -> None:
+        self.keys = keys or []
+        self.tenant_id = tenant_id
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {"keys": self.keys, "tenant_id": self.tenant_id}
+
+
+class CacheGetBatchEntry(_Msg):
+    def __init__(self, key: str = "", value: bytes = b"", found: bool = False) -> None:
+        self.key = key
+        self.value = value
+        self.found = found
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "value": self.value.decode() if isinstance(self.value, bytes) else self.value,
+            "found": self.found,
+        }
+
+
+class CacheGetBatchResponse(_Msg):
+    def __init__(self, entries: list[CacheGetBatchEntry] | None = None) -> None:
+        self.entries = entries or []
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {"entries": [e._to_dict() for e in self.entries]}
+
+
 class CacheSetRequest(_Msg):
     def __init__(self, key: str = "", value: bytes = b"", ttl_seconds: int = 0, tenant_id: str = "") -> None:
         self.key = key

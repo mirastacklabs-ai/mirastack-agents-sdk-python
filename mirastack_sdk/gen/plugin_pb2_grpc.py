@@ -164,6 +164,11 @@ class EngineServiceStub:
             request_serializer=_json_request_serializer,
             response_deserializer=_json_response_deserializer(plugin_pb2.CacheGetResponse),
         )
+        self.CacheGetBatch = channel.unary_unary(
+            "/mirastack.plugin.v1.EngineService/CacheGetBatch",
+            request_serializer=_json_request_serializer,
+            response_deserializer=_json_response_deserializer(plugin_pb2.CacheGetBatchResponse),
+        )
         self.CacheSet = channel.unary_unary(
             "/mirastack.plugin.v1.EngineService/CacheSet",
             request_serializer=_json_request_serializer,
