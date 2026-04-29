@@ -28,6 +28,7 @@ import grpc
 
 from mirastack_sdk.context import EngineContext
 from mirastack_sdk._otel import init_otel, get_tracer
+from mirastack_sdk.tenantid import id_from_slug
 from mirastack_sdk.plugin import (
     Plugin,
     ExecuteRequest,
@@ -64,6 +65,23 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
             "Quality gate failed:\n  - %s", "\n  - ".join(gate_errors)
         )
         sys.exit(1)
+
+    # ── Tenant ID resolution ──────────────────────────────────────────
+    # MIRASTACK_PLUGIN_TENANT_ID must be set to the UUID5 of the tenant.
+    # MIRASTACK_PLUGIN_TENANT_SLUG may be provided instead; the SDK derives
+    # the UUID5 deterministically so operators need not compute it manually.
+    tenant_id = os.environ.get("MIRASTACK_PLUGIN_TENANT_ID", "").strip()
+    if not tenant_id:
+        slug = os.environ.get("MIRASTACK_PLUGIN_TENANT_SLUG", "").strip()
+        if not slug:
+            logger.fatal(
+                "MIRASTACK_PLUGIN_TENANT_ID is required — set it to the UUID5 of "
+                "the tenant this plugin serves, or set MIRASTACK_PLUGIN_TENANT_SLUG "
+                "to derive it"
+            )
+            sys.exit(1)
+        tenant_id = id_from_slug(slug)
+        logger.info("Resolved tenant ID from slug: slug=%s tenant_id=%s", slug, tenant_id)
 
     listen_addr = os.environ.get("MIRASTACK_PLUGIN_ADDR", "[::]:0")
     # Normalize bare ":port" to "0.0.0.0:port" — grpcio 1.72+ rejects empty host.
@@ -115,7 +133,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     instance_id = str(uuid.uuid4())
     if engine_addr:
         try:
-            engine_ctx = EngineContext(engine_addr, info.name)
+            engine_ctx = EngineContext(engine_addr, info.name, tenant_id)
             plugin._engine_context = engine_ctx  # type: ignore[attr-defined]
             logger.info("Connected to engine for callbacks: %s", engine_addr)
         except Exception:
@@ -123,7 +141,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     server.start()
 
-    logger.info("Plugin serving: %s v%s on port %d", info.name, info.version, port)
+    logger.info("Plugin serving: %s v%s on port %d tenant_id=%s", info.name, info.version, port, tenant_id)
 
     # Maintain persistent registration with the engine in a background thread.
     # Registration must not block the gRPC server — the plugin must be ready to
@@ -299,6 +317,7 @@ class _PluginServiceAdapter:
             action_id=request.get("action_id", ""),
             params=params if isinstance(params, dict) else {},
             mode=ExecutionMode(max(0, mode_val - 1)),
+            tenant_id=request.get("tenant_id", ""),
         )
 
         # Map proto TimeRange to SDK TimeRange

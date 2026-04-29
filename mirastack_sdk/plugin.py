@@ -133,6 +133,10 @@ class ExecuteRequest:
     params: dict[str, str] = field(default_factory=dict)
     mode: ExecutionMode = ExecutionMode.GUIDED
     time_range: TimeRange | None = None
+    # UUID5 of the tenant this execution belongs to. The engine stamps this on
+    # every ExecuteRequest; plugins must treat it as authoritative and must
+    # never derive tenant from params or context.
+    tenant_id: str = ""
 
 
 @dataclass

@@ -163,3 +163,44 @@ start = datetimeutils.format_rfc3339(req.time_range.start_epoch_ms)        # Vic
 |----------|---------|-------------|
 | `MIRASTACK_ENGINE_ADDR` | `localhost:50051` | Engine gRPC address |
 | `MIRASTACK_PLUGIN_PORT` | `50052` | Port this agent listens on |
+
+## Tenant Isolation
+
+Every plugin process serves **exactly one tenant**. The engine launches separate processes per tenant — plugin processes are never shared.
+
+### Required Environment Variable
+
+| Variable | Description |
+|----------|-------------|
+| `MIRASTACK_PLUGIN_TENANT_ID` | UUID5 of the tenant this plugin serves (**primary**). Derived via `IDFromSlug(slug)` from the engine engine tenant namespace. |
+| `MIRASTACK_PLUGIN_TENANT_SLUG` | Human-readable slug (e.g. `acme`). Used as fallback when `MIRASTACK_PLUGIN_TENANT_ID` is not set — the SDK derives the UUID5 automatically. |
+
+At least one of the two must be set. If **both are missing** the process exits immediately with a fatal log. This is non-negotiable: a plugin without a tenant identity is unsafe to run.
+
+### How Tenant ID Is Derived
+
+The UUID5 is deterministically derived from the slug:
+
+```
+namespace = UUID("f9f3a4d4-2c64-5b9e-9e25-8a8b6f6f6f6f")
+tenant_id = UUID5(namespace, "tenant:" + strings.ToLower(strings.TrimSpace(slug)))
+```
+
+This matches the formula used by `mirastack-engine/internal/tenants/id.go` so plugin processes and the engine always agree on the tenant identity.
+
+### Helper Function
+
+```go
+// IDFromSlug derives the tenant UUID5 from a human-readable slug.
+// Useful in tests and operator tooling — not needed in normal plugin code.
+tenantID := mirastack.IDFromSlug("acme")
+```
+
+### Auto-Stamping
+
+The SDK automatically stamps `tenant_id` on **every outbound gRPC call** to the engine (config, cache, publish, approval, log, call_plugin, register). Plugin authors must never set `tenant_id` manually or read it from `params`.
+
+### No Cross-Tenant Calls
+
+When an agent calls another agent via `CallPlugin` / `call_plugin_with_time_range`, the SDK stamps the caller's own `tenant_id`. The engine will reject any cross-tenant call. Federation is out of scope.
+

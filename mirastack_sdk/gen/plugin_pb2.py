@@ -132,6 +132,7 @@ class ExecuteRequest(_Msg):
         mode: int = 1,
         context: dict[str, str] | None = None,
         time_range: dict[str, Any] | None = None,
+        tenant_id: str = "",
     ) -> None:
         self.execution_id = execution_id
         self.step_id = step_id
@@ -140,6 +141,10 @@ class ExecuteRequest(_Msg):
         self.mode = mode
         self.context = context or {}
         self.time_range = time_range
+        # tenant_id is the UUID5 tenant identifier resolved by the engine.
+        # Plugins MUST treat this as authoritative and never derive tenant
+        # from params or context.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -149,6 +154,7 @@ class ExecuteRequest(_Msg):
             "params_json": self.params_json.decode() if isinstance(self.params_json, bytes) else self.params_json,
             "mode": self.mode,
             "context": self.context,
+            "tenant_id": self.tenant_id,
         }
         if self.time_range:
             d["time_range"] = self.time_range
@@ -230,11 +236,14 @@ class ConfigUpdatedResponse(_Msg):
 # ---------------------------------------------------------------------------
 
 class GetConfigRequest(_Msg):
-    def __init__(self, plugin_name: str = "") -> None:
+    def __init__(self, plugin_name: str = "", tenant_id: str = "") -> None:
         self.plugin_name = plugin_name
+        # tenant_id is auto-stamped by the SDK; engine validates against the
+        # registered plugin handle and refuses cross-tenant requests.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
-        return {"plugin_name": self.plugin_name}
+        return {"plugin_name": self.plugin_name, "tenant_id": self.tenant_id}
 
 
 class GetConfigResponse(_Msg):
@@ -257,11 +266,14 @@ class GetConfigResponse(_Msg):
 
 
 class CacheGetRequest(_Msg):
-    def __init__(self, key: str = "") -> None:
+    def __init__(self, key: str = "", tenant_id: str = "") -> None:
         self.key = key
+        # tenant_id is auto-stamped by the SDK; engine namespaces the key
+        # under the tenant scope and rejects cross-tenant access.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
-        return {"key": self.key}
+        return {"key": self.key, "tenant_id": self.tenant_id}
 
 
 class CacheGetResponse(_Msg):
@@ -277,16 +289,20 @@ class CacheGetResponse(_Msg):
 
 
 class CacheSetRequest(_Msg):
-    def __init__(self, key: str = "", value: bytes = b"", ttl_seconds: int = 0) -> None:
+    def __init__(self, key: str = "", value: bytes = b"", ttl_seconds: int = 0, tenant_id: str = "") -> None:
         self.key = key
         self.value = value
         self.ttl_seconds = ttl_seconds
+        # tenant_id is auto-stamped by the SDK; engine namespaces the key
+        # under the tenant scope and rejects cross-tenant writes.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "value": self.value.decode() if isinstance(self.value, bytes) else self.value,
             "ttl_seconds": self.ttl_seconds,
+            "tenant_id": self.tenant_id,
         }
 
 
@@ -306,12 +322,16 @@ class PublishResultRequest(_Msg):
         result_json: bytes = b"{}",
         success: bool = True,
         error: str = "",
+        tenant_id: str = "",
     ) -> None:
         self.execution_id = execution_id
         self.step_id = step_id
         self.result_json = result_json
         self.success = success
         self.error = error
+        # tenant_id is auto-stamped by the SDK; engine validates against the
+        # execution's tenant scope.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         return {
@@ -320,6 +340,7 @@ class PublishResultRequest(_Msg):
             "result_json": self.result_json.decode() if isinstance(self.result_json, bytes) else self.result_json,
             "success": self.success,
             "error": self.error,
+            "tenant_id": self.tenant_id,
         }
 
 
@@ -340,6 +361,7 @@ class RequestApprovalRequest(_Msg):
         required_permission: int = 0,
         context_json: bytes = b"{}",
         timeout_seconds: int = 0,
+        tenant_id: str = "",
     ) -> None:
         self.execution_id = execution_id
         self.step_id = step_id
@@ -347,6 +369,9 @@ class RequestApprovalRequest(_Msg):
         self.required_permission = required_permission
         self.context_json = context_json
         self.timeout_seconds = timeout_seconds
+        # tenant_id is auto-stamped by the SDK; engine refuses approvals
+        # from suspended/deleted tenants.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         return {
@@ -356,6 +381,7 @@ class RequestApprovalRequest(_Msg):
             "required_permission": self.required_permission,
             "context_json": self.context_json.decode() if isinstance(self.context_json, bytes) else self.context_json,
             "timeout_seconds": self.timeout_seconds,
+            "tenant_id": self.tenant_id,
         }
 
 
@@ -388,11 +414,15 @@ class LogEventRequest(_Msg):
         event_type: str = "",
         data_json: bytes = b"{}",
         severity: str = "",
+        tenant_id: str = "",
     ) -> None:
         self.plugin_name = plugin_name
         self.event_type = event_type
         self.data_json = data_json
         self.severity = severity
+        # tenant_id is auto-stamped by the SDK; audit events are persisted
+        # under /mirastack/{tenant_id}/audit/{event_id}.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         return {
@@ -400,6 +430,7 @@ class LogEventRequest(_Msg):
             "event_type": self.event_type,
             "data_json": self.data_json.decode() if isinstance(self.data_json, bytes) else self.data_json,
             "severity": self.severity,
+            "tenant_id": self.tenant_id,
         }
 
 
@@ -419,12 +450,19 @@ class CallPluginRequest(_Msg):
         params_json: bytes = b"{}",
         timeout_seconds: int = 0,
         time_range: dict[str, Any] | None = None,
+        tenant_id: str = "",
     ) -> None:
         self.caller_plugin = caller_plugin
         self.target_plugin = target_plugin
         self.params_json = params_json
         self.timeout_seconds = timeout_seconds
         self.time_range = time_range
+        # tenant_id is the UUID5 of the calling plugin's tenant. The engine
+        # refuses any CallPlugin where target_plugin is not registered for
+        # the same tenant_id (PERMISSION_DENIED). Plugins MUST NOT set this
+        # from user input — the SDK auto-stamps it from
+        # MIRASTACK_PLUGIN_TENANT_ID.
+        self.tenant_id = tenant_id
 
     def _to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -432,6 +470,7 @@ class CallPluginRequest(_Msg):
             "target_plugin": self.target_plugin,
             "params_json": self.params_json.decode() if isinstance(self.params_json, bytes) else self.params_json,
             "timeout_seconds": self.timeout_seconds,
+            "tenant_id": self.tenant_id,
         }
         if self.time_range:
             d["time_range"] = self.time_range

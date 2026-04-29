@@ -22,11 +22,14 @@ _DEFAULT_CONFIG_CACHE_TTL = 15
 class EngineContext:
     """Proxy for engine gRPC services available to plugins."""
 
-    def __init__(self, engine_addr: str, plugin_name: str) -> None:
+    def __init__(self, engine_addr: str, plugin_name: str, tenant_id: str = "") -> None:
         if not engine_addr:
             raise ValueError("engine_addr is required")
         self._engine_addr = engine_addr
         self._plugin_name = plugin_name
+        # UUID5 of the tenant this plugin instance serves. Auto-stamped on
+        # every outbound gRPC request so plugin authors never set it manually.
+        self._tenant_id = tenant_id
         self._channel = grpc.insecure_channel(
             engine_addr,
             options=[
@@ -91,6 +94,14 @@ class EngineContext:
         """Retrieve a value from the engine's Valkey cache."""
         return await asyncio.to_thread(self._cache_get_sync, key)
 
+    async def cache_get_batch(self, keys: list[str]) -> list[dict]:
+        """Retrieve multiple values from the engine's Valkey cache in a single MGET round-trip.
+
+        Returns a list of dicts with 'key', 'value', and 'found' fields,
+        in the same order as the input keys.
+        """
+        return await asyncio.to_thread(self._cache_get_batch_sync, keys)
+
     async def cache_set(self, key: str, value: str, ttl: timedelta | None = None) -> None:
         """Store a value in the engine's Valkey cache."""
         await asyncio.to_thread(self._cache_set_sync, key, value, ttl)
@@ -143,45 +154,69 @@ class EngineContext:
     # that blocking gRPC calls do not stall the async event loop.
     # ------------------------------------------------------------------
 
+    @property
+    def tenant_id(self) -> str:
+        """UUID5 of the tenant this plugin instance serves."""
+        return self._tenant_id
+
     def _fetch_config(self) -> dict[str, str]:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
-            req = plugin_pb2.GetConfigRequest(plugin_name=self._plugin_name)
+            req = plugin_pb2.GetConfigRequest(plugin_name=self._plugin_name, tenant_id=self._tenant_id)
             resp = self._stub.GetConfig(req)
             return json.loads(resp.config_json) if resp.config_json else {}
 
         resp = self._call_unary(
             "/mirastack.plugin.v1.EngineService/GetConfig",
-            {"plugin_name": self._plugin_name},
+            {"plugin_name": self._plugin_name, "tenant_id": self._tenant_id},
         )
         return json.loads(resp.get("config_json", b"{}"))
 
     def _cache_get_sync(self, key: str) -> str | None:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
-            resp = self._stub.CacheGet(plugin_pb2.CacheGetRequest(key=key))
+            resp = self._stub.CacheGet(plugin_pb2.CacheGetRequest(key=key, tenant_id=self._tenant_id))
             return resp.value.decode() if resp.found else None
 
         resp = self._call_unary(
             "/mirastack.plugin.v1.EngineService/CacheGet",
-            {"key": key},
+            {"key": key, "tenant_id": self._tenant_id},
         )
         if resp.get("found"):
             return resp.get("value", b"").decode()
         return None
+
+    def _cache_get_batch_sync(self, keys: list[str]) -> list[dict]:
+        if self._stub is not None:
+            from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
+            resp = self._stub.CacheGetBatch(plugin_pb2.CacheGetBatchRequest(keys=keys, tenant_id=self._tenant_id))
+            return [
+                {"key": e.key, "value": e.value.decode() if e.found else "", "found": e.found}
+                for e in resp.entries
+            ]
+
+        resp = self._call_unary(
+            "/mirastack.plugin.v1.EngineService/CacheGetBatch",
+            {"keys": keys, "tenant_id": self._tenant_id},
+        )
+        entries = resp.get("entries", [])
+        return [
+            {"key": e.get("key", ""), "value": e.get("value", b"").decode() if isinstance(e.get("value"), bytes) else e.get("value", ""), "found": e.get("found", False)}
+            for e in entries
+        ]
 
     def _cache_set_sync(self, key: str, value: str, ttl: timedelta | None = None) -> None:
         ttl_seconds = int(ttl.total_seconds()) if ttl else 0
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             self._stub.CacheSet(plugin_pb2.CacheSetRequest(
-                key=key, value=value.encode(), ttl_seconds=ttl_seconds,
+                key=key, value=value.encode(), ttl_seconds=ttl_seconds, tenant_id=self._tenant_id,
             ))
             return
 
         self._call_unary(
             "/mirastack.plugin.v1.EngineService/CacheSet",
-            {"key": key, "value": value.encode(), "ttl_seconds": ttl_seconds},
+            {"key": key, "value": value.encode(), "ttl_seconds": ttl_seconds, "tenant_id": self._tenant_id},
         )
 
     def _publish_result_sync(self, execution_id: str, output: dict[str, str]) -> None:
@@ -189,26 +224,26 @@ class EngineContext:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             self._stub.PublishResult(plugin_pb2.PublishResultRequest(
-                execution_id=execution_id, result_json=result_json, success=True,
+                execution_id=execution_id, result_json=result_json, success=True, tenant_id=self._tenant_id,
             ))
             return
 
         self._call_unary(
             "/mirastack.plugin.v1.EngineService/PublishResult",
-            {"execution_id": execution_id, "result_json": result_json, "success": True},
+            {"execution_id": execution_id, "result_json": result_json, "success": True, "tenant_id": self._tenant_id},
         )
 
     def _request_approval_sync(self, execution_id: str, reason: str) -> bool:
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             resp = self._stub.RequestApproval(plugin_pb2.RequestApprovalRequest(
-                execution_id=execution_id, description=reason,
+                execution_id=execution_id, description=reason, tenant_id=self._tenant_id,
             ))
             return resp.approved
 
         resp = self._call_unary(
             "/mirastack.plugin.v1.EngineService/RequestApproval",
-            {"execution_id": execution_id, "description": reason},
+            {"execution_id": execution_id, "description": reason, "tenant_id": self._tenant_id},
         )
         return resp.get("approved", False)
 
@@ -221,6 +256,7 @@ class EngineContext:
                 event_type=message,
                 data_json=data_json,
                 severity=level,
+                tenant_id=self._tenant_id,
             ))
             return
 
@@ -231,6 +267,7 @@ class EngineContext:
                 "event_type": message,
                 "data_json": data_json,
                 "severity": level,
+                "tenant_id": self._tenant_id,
             },
         )
 
@@ -248,6 +285,7 @@ class EngineContext:
                 target_plugin=target_plugin,
                 params_json=params_json,
                 time_range=time_range,
+                tenant_id=self._tenant_id,
             ))
             if not resp.success:
                 raise RuntimeError(f"Plugin {target_plugin!r} returned error: {resp.error}")
@@ -257,6 +295,7 @@ class EngineContext:
             "caller_plugin": self._plugin_name,
             "target_plugin": target_plugin,
             "params_json": params_json,
+            "tenant_id": self._tenant_id,
         }
         if time_range is not None:
             request["time_range"] = time_range
@@ -300,6 +339,7 @@ class EngineContext:
                 "grpc_addr": grpc_addr,
                 "plugin_type": plugin_type,
                 "instance_id": instance_id,
+                "tenant_id": self._tenant_id,
             },
         )
 
