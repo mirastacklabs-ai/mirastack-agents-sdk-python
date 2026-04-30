@@ -458,75 +458,36 @@ def _maintain_registration(
     instance_id: str,
     stop_event: threading.Event,
 ) -> None:
-    """Perform initial registration then maintain a persistent heartbeat.
+    """Lazily register this tenant-bound plugin, then maintain heartbeat.
 
-    Phase 1: Initial registration with exponential backoff (2 s → 30 s cap,
-    up to 10 attempts).
-    Phase 2: Persistent heartbeat loop that re-registers every interval
+    Registration is intentionally unbounded: plugins may start before engine
+    bootstrap, before the bound tenant exists, or while the engine is
+    restarting. Heartbeat starts only after RegisterPlugin succeeds for the
+    immutable tenant_id.
+
+    The heartbeat loop re-registers every interval when requested
     (default 30 s, configurable via MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL).
-
-    This ensures the plugin survives engine restarts: when the engine comes
-    back, the next heartbeat re-establishes the registration.
-    Runs in a daemon thread so the gRPC server is not blocked.
     """
-    max_attempts = 10
-    max_backoff = 30.0
-    backoff = 2.0
-
     heartbeat_interval_str = os.environ.get("MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL", "30")
     try:
         heartbeat_interval = max(1.0, float(heartbeat_interval_str))
     except ValueError:
         heartbeat_interval = 30.0
 
-    # Phase 1: Initial registration with bounded retries.
-    registered = False
-    for attempt in range(1, max_attempts + 1):
-        if stop_event.is_set():
-            return
-        try:
-            resp = engine_ctx.register_self(
-                grpc_addr=advertise_addr,
-                plugin_type=plugin_type,
-                version=version,
-                instance_id=instance_id,
-            )
-            if resp.get("success"):
-                logger.info(
-                    "Self-registered with engine: plugin_id=%s addr=%s",
-                    resp.get("plugin_id", ""),
-                    advertise_addr,
-                )
-                registered = True
-                break
-            logger.warning(
-                "Self-registration rejected: %s", resp.get("error", "unknown")
-            )
-        except Exception:
-            if attempt == max_attempts:
-                logger.error(
-                    "Initial registration exhausted all retries (%d) — "
-                    "entering heartbeat mode, will keep trying",
-                    max_attempts,
-                    exc_info=True,
-                )
-                break
-            logger.warning(
-                "Self-registration attempt %d failed, retrying in %.0fs",
-                attempt,
-                backoff,
-                exc_info=True,
-            )
+    if not _register_until_accepted(
+        engine_ctx,
+        advertise_addr,
+        plugin_type,
+        version,
+        instance_id,
+        stop_event,
+    ):
+        return
 
-        if stop_event.wait(timeout=backoff):
-            return
-        backoff = min(backoff * 2, max_backoff)
-
-    if registered:
-        logger.info(
-            "Entering registration heartbeat loop (interval=%.0fs)",
-            heartbeat_interval,
-        )
+    logger.info(
+        "Entering registration heartbeat loop (interval=%.0fs)",
+        heartbeat_interval,
+    )
 
     # Phase 2: Persistent heartbeat loop.
     # Sends a lightweight Heartbeat RPC instead of full RegisterPlugin.
@@ -554,32 +515,17 @@ def _maintain_registration(
 
             if resp.get("re_register_required"):
                 logger.info("Engine requested re-registration, performing full RegisterPlugin")
-                try:
-                    reg_resp = engine_ctx.register_self(
-                        grpc_addr=advertise_addr,
-                        plugin_type=plugin_type,
-                        version=version,
-                        instance_id=instance_id,
-                    )
-                    if reg_resp.get("success"):
-                        logger.info(
-                            "Re-registered with engine: plugin_id=%s",
-                            reg_resp.get("plugin_id", ""),
-                        )
-                    else:
-                        consecutive_failures += 1
-                        logger.warning(
-                            "Re-registration rejected: %s",
-                            reg_resp.get("error", "unknown"),
-                        )
-                        continue
-                except Exception:
-                    consecutive_failures += 1
-                    logger.warning(
-                        "Re-registration after heartbeat failed",
-                        exc_info=True,
-                    )
-                    continue
+                if not _register_until_accepted(
+                    engine_ctx,
+                    advertise_addr,
+                    plugin_type,
+                    version,
+                    instance_id,
+                    stop_event,
+                ):
+                    return
+                consecutive_failures = 0
+                continue
 
             if consecutive_failures > 0:
                 logger.info(
@@ -595,3 +541,87 @@ def _maintain_registration(
                     consecutive_failures,
                     exc_info=True,
                 )
+
+
+def _register_until_accepted(
+    engine_ctx: EngineContext,
+    advertise_addr: str,
+    plugin_type: int,
+    version: str,
+    instance_id: str,
+    stop_event: threading.Event,
+) -> bool:
+    """Retry RegisterPlugin until accepted or the process is shutting down."""
+    max_backoff = 30.0
+    backoff = 2.0
+    attempt = 1
+
+    while not stop_event.is_set():
+        try:
+            resp = engine_ctx.register_self(
+                grpc_addr=advertise_addr,
+                plugin_type=plugin_type,
+                version=version,
+                instance_id=instance_id,
+            )
+            if resp.get("success"):
+                logger.info(
+                    "Self-registered with engine: plugin_id=%s addr=%s tenant_id=%s",
+                    resp.get("plugin_id", ""),
+                    advertise_addr,
+                    engine_ctx.tenant_id,
+                )
+                return True
+
+            reason, needs_operator_action = _classify_registration_error(
+                resp.get("error", "unknown")
+            )
+            logger.warning(
+                "Plugin registration pending; will retry "
+                "(attempt=%d backoff=%.0fs tenant_id=%s reason=%s "
+                "needs_operator_action=%s error=%s)",
+                attempt,
+                backoff,
+                engine_ctx.tenant_id,
+                reason,
+                needs_operator_action,
+                resp.get("error", "unknown"),
+            )
+        except Exception as exc:
+            reason, needs_operator_action = _classify_registration_error(str(exc))
+            logger.warning(
+                "Plugin registration pending; will retry "
+                "(attempt=%d backoff=%.0fs tenant_id=%s reason=%s "
+                "needs_operator_action=%s)",
+                attempt,
+                backoff,
+                engine_ctx.tenant_id,
+                reason,
+                needs_operator_action,
+                exc_info=True,
+            )
+
+        if stop_event.wait(timeout=backoff):
+            return False
+        backoff = min(backoff * 2, max_backoff)
+        attempt += 1
+
+    return False
+
+
+def _classify_registration_error(error: str) -> tuple[str, bool]:
+    """Return (reason, needs_operator_action) for registration retry logs."""
+    msg = error.lower()
+    if any(token in msg for token in ("connection refused", "unavailable", "no such host", "transport")):
+        return "engine_unavailable", False
+    if "tenant" in msg and ("not active" in msg or "not found" in msg):
+        return "tenant_not_active_or_missing", False
+    if "permission" in msg or "permissiondenied" in msg:
+        return "permission_denied", True
+    if "invalidargument" in msg or "invalid argument" in msg:
+        return "invalid_registration_request", True
+    if "resourceexhausted" in msg or "quota" in msg or "license" in msg:
+        return "license_or_quota_exhausted", True
+    if "register plugin rejected" in msg:
+        return "registration_rejected", True
+    return "registration_rejected", False

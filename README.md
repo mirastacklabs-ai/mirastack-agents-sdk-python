@@ -172,10 +172,12 @@ Every plugin process serves **exactly one tenant**. The engine launches separate
 
 | Variable | Description |
 |----------|-------------|
-| `MIRASTACK_PLUGIN_TENANT_ID` | UUID5 of the tenant this plugin serves (**primary**). Derived via `IDFromSlug(slug)` from the engine engine tenant namespace. |
-| `MIRASTACK_PLUGIN_TENANT_SLUG` | Human-readable slug (e.g. `acme`). Used as fallback when `MIRASTACK_PLUGIN_TENANT_ID` is not set — the SDK derives the UUID5 automatically. |
+| `MIRASTACK_PLUGIN_TENANT_SLUG` | Human-readable slug (e.g. `acme`). Preferred deployment input; the SDK derives the UUID5 automatically. |
+| `MIRASTACK_PLUGIN_TENANT_ID` | Advanced override. UUID5 of the tenant this plugin serves; wins when both variables are set. |
 
 At least one of the two must be set. If **both are missing** the process exits immediately with a fatal log. This is non-negotiable: a plugin without a tenant identity is unsafe to run.
+
+Registration is lazy after the tenant binding is resolved. The plugin starts its gRPC server and keeps retrying `RegisterPlugin` while the engine is unavailable, still in bootstrap mode, or missing the bound tenant. Once the operator creates a tenant with the same slug, registration succeeds automatically. The SDK never auto-discovers the first tenant.
 
 ### How Tenant ID Is Derived
 
