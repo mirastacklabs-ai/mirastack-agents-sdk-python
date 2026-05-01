@@ -33,6 +33,7 @@ from mirastack_sdk.plugin import (
     Plugin,
     ExecuteRequest,
     ExecutionMode,
+    LicenseContext,
     ParamSchema,
     TimeRange,
 )
@@ -158,7 +159,15 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
         advertise_addr = _resolve_advertise_addr(port)
         reg_thread = threading.Thread(
             target=_maintain_registration,
-            args=(engine_ctx, advertise_addr, 1, info.version, instance_id, stop_event),
+            args=(
+                engine_ctx,
+                advertise_addr,
+                1,
+                info.version,
+                instance_id,
+                stop_event,
+                plugin,
+            ),
             daemon=True,
             name="mirastack-register",
         )
@@ -457,6 +466,7 @@ def _maintain_registration(
     version: str,
     instance_id: str,
     stop_event: threading.Event,
+    plugin: Plugin,
 ) -> None:
     """Lazily register this tenant-bound plugin, then maintain heartbeat.
 
@@ -467,6 +477,13 @@ def _maintain_registration(
 
     The heartbeat loop re-registers every interval when requested
     (default 30 s, configurable via MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL).
+
+    On every successful register or heartbeat the engine's licensing
+    snapshot (``license`` field of the JSON response) is parsed into a
+    typed :class:`mirastack_sdk.LicenseContext`, stored on the plugin
+    instance as ``plugin._engine_license_context``, and meaningful changes
+    are logged. SDK consumers wanting to short-circuit work the engine
+    would reject can read that attribute at any time.
     """
     heartbeat_interval_str = os.environ.get("MIRASTACK_PLUGIN_HEARTBEAT_INTERVAL", "30")
     try:
@@ -481,6 +498,7 @@ def _maintain_registration(
         version,
         instance_id,
         stop_event,
+        plugin,
     ):
         return
 
@@ -513,6 +531,8 @@ def _maintain_registration(
                         heartbeat_interval,
                     )
 
+            _absorb_license_snapshot(plugin, resp.get("license"))
+
             if resp.get("re_register_required"):
                 logger.info("Engine requested re-registration, performing full RegisterPlugin")
                 if not _register_until_accepted(
@@ -522,6 +542,7 @@ def _maintain_registration(
                     version,
                     instance_id,
                     stop_event,
+                    plugin,
                 ):
                     return
                 consecutive_failures = 0
@@ -550,6 +571,7 @@ def _register_until_accepted(
     version: str,
     instance_id: str,
     stop_event: threading.Event,
+    plugin: Plugin,
 ) -> bool:
     """Retry RegisterPlugin until accepted or the process is shutting down."""
     max_backoff = 30.0
@@ -571,6 +593,7 @@ def _register_until_accepted(
                     advertise_addr,
                     engine_ctx.tenant_id,
                 )
+                _absorb_license_snapshot(plugin, resp.get("license"))
                 return True
 
             reason, needs_operator_action = _classify_registration_error(
@@ -625,3 +648,84 @@ def _classify_registration_error(error: str) -> tuple[str, bool]:
     if "register plugin rejected" in msg:
         return "registration_rejected", True
     return "registration_rejected", False
+
+
+def _absorb_license_snapshot(plugin: Plugin, raw: object) -> None:
+    """Parse and stash the engine's licence snapshot on the plugin instance.
+
+    The engine attaches a ``license`` field to ``RegisterPluginResponse``
+    and ``HeartbeatResponse`` (see ``pluginv1.LicenseContext`` in
+    ``mirastack-agents-sdk-go``). This helper:
+
+      * is a no-op when the engine omits the field (boot race) — the
+        plugin keeps its previous snapshot;
+      * stores the typed value at ``plugin._engine_license_context`` so
+        plugin code can read it directly;
+      * emits one ``INFO`` line on the first observation and on any
+        meaningful change (active flag, effective tier, grace mode,
+        expiry instant) so operators can see tier transitions in plugin
+        logs without code changes;
+      * downgrades to ``WARNING`` when ``active`` flips to false or when
+        ``grace_mode`` becomes true so the operator's log scraper can
+        alert on the transition.
+
+    The helper never raises: if the engine returns an unexpected shape
+    we log it once and keep the previous snapshot.
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        logger.warning(
+            "License snapshot from engine has unexpected type %s; ignoring",
+            type(raw).__name__,
+        )
+        return
+    try:
+        new_ctx = LicenseContext.from_dict(raw)
+    except Exception:
+        logger.warning("Failed to parse license snapshot from engine", exc_info=True)
+        return
+    if new_ctx is None:
+        return
+
+    prev_ctx = getattr(plugin, "_engine_license_context", None)
+    plugin._engine_license_context = new_ctx  # type: ignore[attr-defined]
+
+    if prev_ctx is None:
+        log_fn = logger.warning if (not new_ctx.active or new_ctx.grace_mode) else logger.info
+        log_fn(
+            "Engine license snapshot: active=%s effective_tier=%s issued_tier=%s "
+            "grace_mode=%s expires_at=%d max_tenants=%d max_integration_types=%d "
+            "max_agentic_sessions_per_day=%d",
+            new_ctx.active,
+            new_ctx.effective_tier or "<unset>",
+            new_ctx.issued_tier or "<unset>",
+            new_ctx.grace_mode,
+            new_ctx.expires_at,
+            new_ctx.quotas.max_tenants,
+            new_ctx.quotas.max_integration_types,
+            new_ctx.quotas.max_agentic_sessions_per_day,
+        )
+        return
+
+    changed_fields: list[str] = []
+    if prev_ctx.active != new_ctx.active:
+        changed_fields.append(f"active {prev_ctx.active}->{new_ctx.active}")
+    if prev_ctx.effective_tier != new_ctx.effective_tier:
+        changed_fields.append(
+            f"effective_tier {prev_ctx.effective_tier or '<unset>'}->{new_ctx.effective_tier or '<unset>'}"
+        )
+    if prev_ctx.grace_mode != new_ctx.grace_mode:
+        changed_fields.append(f"grace_mode {prev_ctx.grace_mode}->{new_ctx.grace_mode}")
+    if prev_ctx.expires_at != new_ctx.expires_at:
+        changed_fields.append(f"expires_at {prev_ctx.expires_at}->{new_ctx.expires_at}")
+
+    if not changed_fields:
+        return
+
+    flipped_to_inactive = prev_ctx.active and not new_ctx.active
+    flipped_to_grace = (not prev_ctx.grace_mode) and new_ctx.grace_mode
+    log_fn = (
+        logger.warning if (flipped_to_inactive or flipped_to_grace) else logger.info
+    )
+    log_fn("Engine license snapshot changed: %s", "; ".join(changed_fields))

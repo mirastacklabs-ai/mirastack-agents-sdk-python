@@ -1,6 +1,6 @@
 """MIRASTACK SDK for Python — Build plugins for the MIRASTACK engine."""
 
-__version__ = "1.5.2"
+__version__ = "1.8.0"
 
 from mirastack_sdk.plugin import (
     Action,
@@ -16,6 +16,8 @@ from mirastack_sdk.plugin import (
     Permission,
     DevOpsStage,
     ExecutionMode,
+    LicenseContext,
+    LicenseQuotas,
 )
 from mirastack_sdk.context import EngineContext
 from mirastack_sdk.respond import respond_map, respond_json, respond_error, respond_raw
@@ -36,6 +38,8 @@ __all__ = [
     "Permission",
     "DevOpsStage",
     "ExecutionMode",
+    "LicenseContext",
+    "LicenseQuotas",
     "EngineContext",
     "respond_map",
     "respond_json",

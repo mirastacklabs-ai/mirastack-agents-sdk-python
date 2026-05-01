@@ -5,7 +5,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any
+from typing import Any, Mapping
 
 
 class Permission(IntEnum):
@@ -184,3 +184,103 @@ class Plugin(abc.ABC):
     async def config_updated(self, config: dict[str, str]) -> None:
         """Called when the engine pushes new configuration."""
         pass
+
+
+# ---------------------------------------------------------------------------
+# Licensing snapshot (added in SDK v1.8.0 to mirror Go SDK pluginv1)
+#
+# The engine sends a `license` field on every RegisterPluginResponse and
+# HeartbeatResponse. The wire format is JSON (see EngineContext._call_unary
+# in context.py for the codec). These dataclasses give Python plugin authors
+# a typed view that is byte-for-byte identical to the Go SDK's
+# `pluginv1.LicenseContext` / `pluginv1.LicenseQuotas` structs and survives
+# the round-trip through `dataclasses.asdict`.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LicenseQuotas:
+    """Engine-enforced licence caps. ``-1`` means unlimited.
+
+    AI Box counts are deliberately omitted: per the engine's licensing
+    rules they are marketing labels and never enforced at runtime. Only
+    fields the engine actively meters appear here.
+    """
+
+    max_tenants: int = 0
+    max_integration_types: int = 0
+    max_agentic_sessions_per_day: int = 0
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "LicenseQuotas":
+        """Build a typed quotas value from the engine's JSON dict.
+
+        Returns a zero-valued instance when ``data`` is ``None`` or empty —
+        the engine omits the field for unlimited tiers and the SDK should
+        not raise.
+        """
+        if not data:
+            return cls()
+        return cls(
+            max_tenants=int(data.get("max_tenants", 0) or 0),
+            max_integration_types=int(data.get("max_integration_types", 0) or 0),
+            max_agentic_sessions_per_day=int(
+                data.get("max_agentic_sessions_per_day", 0) or 0
+            ),
+        )
+
+
+@dataclass
+class LicenseContext:
+    """Engine licensing snapshot served at registration and heartbeat.
+
+    Field semantics:
+
+      * ``active``: ``True`` iff the engine considers the license
+        currently enforceable (signed, not revoked, not past expiry).
+      * ``effective_tier``: tier the engine is currently honouring.
+        During the post-expiry grace period this degrades to ``"neo"``
+        while the payload still carries the originally-issued tier.
+      * ``grace_mode``: ``True`` when the license has expired and the
+        engine is serving from grace; the SDK warns at startup.
+      * ``quotas``: distilled hard caps the SDK MAY use to choose
+        between paths (e.g. skip a feature a "neo" install cannot run).
+        ``-1`` in any quota means unlimited.
+
+    See ``mirastack-agents-sdk-go/gen/pluginv1.LicenseContext`` for the
+    canonical Go-side struct this dataclass mirrors.
+    """
+
+    active: bool = False
+    effective_tier: str = ""
+    issued_tier: str = ""
+    grace_mode: bool = False
+    expires_at: int = 0  # epoch ms
+    org_id: str = ""
+    site_id: str = ""
+    region: str = ""
+    region_kind: str = ""
+    quotas: LicenseQuotas = field(default_factory=LicenseQuotas)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "LicenseContext | None":
+        """Build a typed context from the engine's JSON dict.
+
+        Returns ``None`` when ``data`` is ``None`` (engine could not
+        resolve the active license — boot race) so callers can keep
+        using the last-known snapshot.
+        """
+        if data is None:
+            return None
+        return cls(
+            active=bool(data.get("active", False)),
+            effective_tier=str(data.get("effective_tier", "")),
+            issued_tier=str(data.get("issued_tier", "")),
+            grace_mode=bool(data.get("grace_mode", False)),
+            expires_at=int(data.get("expires_at", 0) or 0),
+            org_id=str(data.get("org_id", "")),
+            site_id=str(data.get("site_id", "")),
+            region=str(data.get("region", "")),
+            region_kind=str(data.get("region_kind", "")),
+            quotas=LicenseQuotas.from_dict(data.get("quotas")),
+        )
