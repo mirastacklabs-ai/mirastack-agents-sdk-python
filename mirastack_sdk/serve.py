@@ -28,6 +28,7 @@ import grpc
 
 from mirastack_sdk.context import EngineContext
 from mirastack_sdk._otel import init_otel, get_tracer
+from mirastack_sdk._metrics import init_meter_provider
 from mirastack_sdk.tenantid import id_from_slug
 from mirastack_sdk.plugin import (
     Plugin,
@@ -124,6 +125,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
 
     # Initialize OpenTelemetry (no-op when MIRASTACK_OTEL_ENABLED != "true")
     otel_shutdown = init_otel(info.name)
+    meter_shutdown = init_meter_provider(info.name)
 
     # Write the actual port to stdout for the engine to discover
     print(f"MIRASTACK_PLUGIN_PORT={port}", flush=True)
@@ -186,6 +188,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
             except Exception:
                 logger.warning("Deregistration from engine failed", exc_info=True)
         otel_shutdown()
+        meter_shutdown()
         server.stop(grace=5)
 
     signal.signal(signal.SIGINT, _signal_handler)

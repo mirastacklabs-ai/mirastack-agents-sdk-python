@@ -18,6 +18,9 @@ logger = logging.getLogger("mirastack_sdk.otel")
 
 TRACER_NAME = "mirastack.plugin"
 
+# Stamped on every resource so back-ends can route by plugin family.
+COMPONENT_KIND = "agent"
+
 # Sentinel that indicates OTel is not active
 def _NOOP_SHUTDOWN() -> None:
     pass
@@ -64,6 +67,7 @@ def init_otel(plugin_name: str) -> Callable[[], None]:
         {
             SERVICE_NAME: service_name,
             SERVICE_VERSION: service_version,
+            "mirastack.component_kind": COMPONENT_KIND,
         }
     )
 

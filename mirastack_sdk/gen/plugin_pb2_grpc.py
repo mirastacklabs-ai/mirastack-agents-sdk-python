@@ -159,6 +159,16 @@ class EngineServiceStub:
             request_serializer=_json_request_serializer,
             response_deserializer=_json_response_deserializer(plugin_pb2.GetConfigResponse),
         )
+        self.ListKPIs = channel.unary_unary(
+            "/mirastack.plugin.v1.EngineService/ListKPIs",
+            request_serializer=_json_request_serializer,
+            response_deserializer=_json_response_deserializer(plugin_pb2.ListKPIsResponse),
+        )
+        self.GetKPI = channel.unary_unary(
+            "/mirastack.plugin.v1.EngineService/GetKPI",
+            request_serializer=_json_request_serializer,
+            response_deserializer=_json_response_deserializer(plugin_pb2.GetKPIResponse),
+        )
         self.CacheGet = channel.unary_unary(
             "/mirastack.plugin.v1.EngineService/CacheGet",
             request_serializer=_json_request_serializer,

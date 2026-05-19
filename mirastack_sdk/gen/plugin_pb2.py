@@ -265,6 +265,107 @@ class GetConfigResponse(_Msg):
         }
 
 
+class KPIView(_Msg):
+    def __init__(
+        self,
+        id: str = "",
+        tenant_id: str = "",
+        name: str = "",
+        query: str = "",
+        integration_id: str = "",
+        kind: str = "",
+        layer: str = "",
+        sentiment: str = "",
+        classifier: str = "",
+        definition: str = "",
+        created_at: int = 0,
+        updated_at: int = 0,
+        created_by: str = "",
+        updated_by: str = "",
+    ) -> None:
+        self.id = id
+        self.tenant_id = tenant_id
+        self.name = name
+        self.query = query
+        self.integration_id = integration_id
+        self.kind = kind
+        self.layer = layer
+        self.sentiment = sentiment
+        self.classifier = classifier
+        self.definition = definition
+        self.created_at = created_at
+        self.updated_at = updated_at
+        self.created_by = created_by
+        self.updated_by = updated_by
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "name": self.name,
+            "query": self.query,
+            "integration_id": self.integration_id,
+            "kind": self.kind,
+            "layer": self.layer,
+            "sentiment": self.sentiment,
+            "classifier": self.classifier,
+            "definition": self.definition,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+        }
+
+
+class ListKPIsRequest(_Msg):
+    def __init__(self, tenant_id: str = "", kind: str = "", layer: str = "") -> None:
+        self.tenant_id = tenant_id
+        self.kind = kind
+        self.layer = layer
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "tenant_id": self.tenant_id,
+            "kind": self.kind,
+            "layer": self.layer,
+        }
+
+
+class ListKPIsResponse(_Msg):
+    def __init__(self, kpis: list[KPIView] | list[dict[str, Any]] | None = None) -> None:
+        raw = kpis or []
+        self.kpis = [
+            item if isinstance(item, KPIView) else KPIView(**item)
+            for item in raw
+        ]
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {"kpis": [k._to_dict() for k in self.kpis]}
+
+
+class GetKPIRequest(_Msg):
+    def __init__(self, tenant_id: str = "", kpi_id: str = "") -> None:
+        self.tenant_id = tenant_id
+        self.kpi_id = kpi_id
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {
+            "tenant_id": self.tenant_id,
+            "kpi_id": self.kpi_id,
+        }
+
+
+class GetKPIResponse(_Msg):
+    def __init__(self, kpi: KPIView | dict[str, Any] | None = None) -> None:
+        if isinstance(kpi, KPIView) or kpi is None:
+            self.kpi = kpi
+        else:
+            self.kpi = KPIView(**kpi)
+
+    def _to_dict(self) -> dict[str, Any]:
+        return {"kpi": self.kpi._to_dict() if self.kpi else None}
+
+
 class CacheGetRequest(_Msg):
     def __init__(self, key: str = "", tenant_id: str = "") -> None:
         self.key = key

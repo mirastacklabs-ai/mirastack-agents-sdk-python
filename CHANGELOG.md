@@ -25,6 +25,37 @@ feature.
 All MIRASTACK agents — Python and Go — MUST be on the latest paired SDK
 minor before the engine cuts a release; the engine's CI gate enforces this.
 
+## [1.10.0] — 2026-05
+
+This release **realigns the Python SDK with `mirastack-agents-sdk-go v1.10.0`**.
+Version 1.9.0 is intentionally skipped — `mirastack-agents-sdk-go v1.9.0`
+added the `ChatStream` RPC for provider-side streaming, which is not
+relevant to agent Python plugins, so the Python SDK jumps straight to
+1.10.0 to stay on a single Go ↔ Python version axis.
+
+### Added
+- `EngineContext.list_kpis(kind="", layer="")` and
+  `EngineContext.get_kpi(kpi_id)` — typed engine callbacks that let
+  agent plugins read the tenant's KPI definitions from the engine's
+  Kine-backed KPI store. Both calls are tenant-scoped server-side via
+  the SDK's auto-stamped `tenant_id`.
+- gRPC stubs for `EngineService.ListKPIs` and `EngineService.GetKPI`
+  in `mirastack_sdk.gen.plugin_pb2_grpc`. Plugins built against an
+  engine that has not yet implemented these handlers receive a gRPC
+  `Unimplemented` status; the SDK surfaces a typed error.
+- OpenTelemetry `MeterProvider` initialised in `serve()` alongside the
+  existing `TracerProvider`. Gated by `MIRASTACK_OTEL_ENABLED` and the
+  standard `OTEL_EXPORTER_OTLP_*` env vars. Install the extras with
+  `pip install mirastack-agents-sdk[otel]`. New `mirastack_sdk.obs`
+  sub-package exposes counters/histograms agent authors can use to
+  instrument their domain logic.
+
+### Engine prerequisite
+The engine must implement `internal/grpcserver.EngineService.ListKPIs`
+and `GetKPI` backed by the Kine prefix `/mirastack/{tenant_id}/kpis/`
+before plugins relying on these APIs can be deployed. The engine
+release that ships these handlers is the paired minimum for `v1.10.0`.
+
 ## [1.8.0] — 2026-05-01
 
 This release **realigns the Python SDK with `mirastack-agents-sdk-go v1.8.0`**.

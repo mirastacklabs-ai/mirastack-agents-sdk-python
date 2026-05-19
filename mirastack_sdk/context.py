@@ -94,6 +94,14 @@ class EngineContext:
         """Retrieve a value from the engine's Valkey cache."""
         return await asyncio.to_thread(self._cache_get_sync, key)
 
+    async def list_kpis(self, kind: str = "", layer: str = "") -> list[dict[str, Any]]:
+        """List KPI definitions for this plugin's tenant."""
+        return await asyncio.to_thread(self._list_kpis_sync, kind, layer)
+
+    async def get_kpi(self, kpi_id: str) -> dict[str, Any] | None:
+        """Fetch one KPI definition by ID for this plugin's tenant."""
+        return await asyncio.to_thread(self._get_kpi_sync, kpi_id)
+
     async def cache_get_batch(self, keys: list[str]) -> list[dict]:
         """Retrieve multiple values from the engine's Valkey cache in a single MGET round-trip.
 
@@ -185,6 +193,61 @@ class EngineContext:
         if resp.get("found"):
             return resp.get("value", b"").decode()
         return None
+
+    @staticmethod
+    def _kpi_msg_to_dict(kpi: Any) -> dict[str, Any]:
+        if kpi is None:
+            return {}
+        if isinstance(kpi, dict):
+            return dict(kpi)
+        if hasattr(kpi, "_to_dict"):
+            return kpi._to_dict()
+        return {
+            "id": getattr(kpi, "id", ""),
+            "tenant_id": getattr(kpi, "tenant_id", ""),
+            "name": getattr(kpi, "name", ""),
+            "query": getattr(kpi, "query", ""),
+            "integration_id": getattr(kpi, "integration_id", ""),
+            "kind": getattr(kpi, "kind", ""),
+            "layer": getattr(kpi, "layer", ""),
+            "sentiment": getattr(kpi, "sentiment", ""),
+            "classifier": getattr(kpi, "classifier", ""),
+            "definition": getattr(kpi, "definition", ""),
+            "created_at": getattr(kpi, "created_at", 0),
+            "updated_at": getattr(kpi, "updated_at", 0),
+            "created_by": getattr(kpi, "created_by", ""),
+            "updated_by": getattr(kpi, "updated_by", ""),
+        }
+
+    def _list_kpis_sync(self, kind: str, layer: str) -> list[dict[str, Any]]:
+        if self._stub is not None:
+            from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
+            req = plugin_pb2.ListKPIsRequest(tenant_id=self._tenant_id, kind=kind, layer=layer)
+            resp = self._stub.ListKPIs(req)
+            return [self._kpi_msg_to_dict(kpi) for kpi in getattr(resp, "kpis", [])]
+
+        resp = self._call_unary(
+            "/mirastack.plugin.v1.EngineService/ListKPIs",
+            {"tenant_id": self._tenant_id, "kind": kind, "layer": layer},
+        )
+        items = resp.get("kpis", []) if isinstance(resp, dict) else []
+        return [self._kpi_msg_to_dict(item) for item in items]
+
+    def _get_kpi_sync(self, kpi_id: str) -> dict[str, Any] | None:
+        if self._stub is not None:
+            from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
+            req = plugin_pb2.GetKPIRequest(tenant_id=self._tenant_id, kpi_id=kpi_id)
+            resp = self._stub.GetKPI(req)
+            kpi = getattr(resp, "kpi", None)
+            return None if kpi is None else self._kpi_msg_to_dict(kpi)
+
+        resp = self._call_unary(
+            "/mirastack.plugin.v1.EngineService/GetKPI",
+            {"tenant_id": self._tenant_id, "kpi_id": kpi_id},
+        )
+        if not isinstance(resp, dict) or resp.get("kpi") is None:
+            return None
+        return self._kpi_msg_to_dict(resp.get("kpi"))
 
     def _cache_get_batch_sync(self, keys: list[str]) -> list[dict]:
         if self._stub is not None:
