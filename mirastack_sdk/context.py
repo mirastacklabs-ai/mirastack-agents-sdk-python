@@ -15,8 +15,43 @@ from typing import Any
 
 import grpc
 
+from mirastack_sdk.plugin import Permission
+
 # Default config cache TTL in seconds.
 _DEFAULT_CONFIG_CACHE_TTL = 15
+
+
+# Proto enum values for pluginv1.Permission. Mirrors the constants defined
+# on the wire (proto/mirastack/plugin/v1/plugin.proto):
+#   PERMISSION_UNSPECIFIED = 0
+#   PERMISSION_READ        = 1
+#   PERMISSION_MODIFY      = 2
+#   PERMISSION_ADMIN       = 3
+#
+# The SDK-side ``Permission`` IntEnum is offset by 1 (READ=0, MODIFY=1,
+# ADMIN=2) for backward compatibility with existing plugin code. We use an
+# explicit mapping here \u2014 NEVER a direct ``int(p) + 1`` cast \u2014 to keep
+# the offset visible and to ensure unrecognised values fail closed.
+_PROTO_PERMISSION_UNSPECIFIED = 0
+_PROTO_PERMISSION_READ = 1
+_PROTO_PERMISSION_MODIFY = 2
+_PROTO_PERMISSION_ADMIN = 3
+
+
+def _permission_to_proto(permission: Permission) -> int:
+    """Map the SDK-side Permission enum to the proto-side int enum.
+
+    Anything unrecognised is treated as MODIFY \u2014 the conservative default
+    that still routes the action through the human-approval queue rather
+    than silently auto-approving.
+    """
+    if permission == Permission.READ:
+        return _PROTO_PERMISSION_READ
+    if permission == Permission.MODIFY:
+        return _PROTO_PERMISSION_MODIFY
+    if permission == Permission.ADMIN:
+        return _PROTO_PERMISSION_ADMIN
+    return _PROTO_PERMISSION_MODIFY
 
 
 class EngineContext:
@@ -118,9 +153,28 @@ class EngineContext:
         """Send execution output back to the engine."""
         await asyncio.to_thread(self._publish_result_sync, execution_id, output)
 
-    async def request_approval(self, execution_id: str, reason: str) -> bool:
-        """Pause execution and wait for human approval."""
-        return await asyncio.to_thread(self._request_approval_sync, execution_id, reason)
+    async def request_approval(
+        self,
+        execution_id: str,
+        reason: str,
+        permission: Permission,
+    ) -> bool:
+        """Pause execution and wait for human approval.
+
+        Args:
+            execution_id: The execution id from the incoming ExecuteRequest.
+            reason: Human-readable description shown on the approval card.
+            permission: Permission level of the gated action. MUST reflect the
+                side-effect class of the action being approved
+                (``Permission.MODIFY`` for stateful changes,
+                ``Permission.ADMIN`` for destructive/privileged operations).
+                The engine uses this to choose the minimum approver role
+                (engineer for MODIFY, admin for ADMIN) and to label the
+                approval card surfaced to the chat / web client.
+        """
+        return await asyncio.to_thread(
+            self._request_approval_sync, execution_id, reason, permission,
+        )
 
     async def log_event(self, level: str, message: str, fields: dict[str, str] | None = None) -> None:
         """Send a log entry to the engine's event stream."""
@@ -296,17 +350,31 @@ class EngineContext:
             {"execution_id": execution_id, "result_json": result_json, "success": True, "tenant_id": self._tenant_id},
         )
 
-    def _request_approval_sync(self, execution_id: str, reason: str) -> bool:
+    def _request_approval_sync(
+        self,
+        execution_id: str,
+        reason: str,
+        permission: Permission,
+    ) -> bool:
+        required_permission = _permission_to_proto(permission)
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
             resp = self._stub.RequestApproval(plugin_pb2.RequestApprovalRequest(
-                execution_id=execution_id, description=reason, tenant_id=self._tenant_id,
+                execution_id=execution_id,
+                description=reason,
+                tenant_id=self._tenant_id,
+                required_permission=required_permission,
             ))
             return resp.approved
 
         resp = self._call_unary(
             "/mirastack.plugin.v1.EngineService/RequestApproval",
-            {"execution_id": execution_id, "description": reason, "tenant_id": self._tenant_id},
+            {
+                "execution_id": execution_id,
+                "description": reason,
+                "tenant_id": self._tenant_id,
+                "required_permission": required_permission,
+            },
         )
         return resp.get("approved", False)
 
