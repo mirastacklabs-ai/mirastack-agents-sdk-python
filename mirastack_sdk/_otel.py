@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable
+from collections.abc import Callable
 
 logger = logging.getLogger("mirastack_sdk.otel")
 
@@ -47,7 +47,7 @@ def init_otel(plugin_name: str) -> Callable[[], None]:
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
             OTLPSpanExporter,
         )
-        from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
+        from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.sdk.trace.sampling import (

@@ -7,18 +7,55 @@ pair ``mirastack_agent_actions_total`` +
 ``mirastack_agent_action_latency_seconds``.
 
 Vocabulary owned by this module is declared in
-``developer/engine-agents-connectors-providers/notes/mirastack-observability-semconv.md``
+``developer/Observe/mirastack-observability-semconv.md``
 §3.2 (span name ``agent.action``) and §4.2 (metric names).
 """
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, Optional
 
 TRACER_NAME = "github.com/mirastacklabs-ai/mirastack-agents-sdk-python"
 METER_NAME = TRACER_NAME
+COMPONENT_KIND = "agent"
+COMPONENT_KIND_ATTR_KEY = "mirastack.component_kind"
+TENANT_ID_ENV_KEY = "MIRASTACK_PLUGIN_TENANT_ID"
+UNRESOLVED_TENANT_ID_LABEL = "unresolved"
+
+_ACTION_COUNTER = None
+_ACTION_LATENCY = None
+_ACTION_INSTRUMENTS_READY = False
+
+
+def _action_instruments():
+    global _ACTION_COUNTER, _ACTION_LATENCY, _ACTION_INSTRUMENTS_READY
+    if _ACTION_INSTRUMENTS_READY:
+        return _ACTION_COUNTER, _ACTION_LATENCY
+
+    try:
+        from opentelemetry import metrics as _metrics
+    except ImportError:
+        _ACTION_INSTRUMENTS_READY = True
+        return None, None
+
+    meter = _metrics.get_meter(METER_NAME)
+    _ACTION_COUNTER = meter.create_counter("mirastack_agent_actions_total")
+    _ACTION_LATENCY = meter.create_histogram(
+        "mirastack_agent_action_latency_seconds", unit="s"
+    )
+    _ACTION_INSTRUMENTS_READY = True
+    return _ACTION_COUNTER, _ACTION_LATENCY
+
+
+def _identity_metric_attrs() -> dict[str, str]:
+    tenant_id = os.getenv(TENANT_ID_ENV_KEY, "").strip() or UNRESOLVED_TENANT_ID_LABEL
+    return {
+        COMPONENT_KIND_ATTR_KEY: COMPONENT_KIND,
+        "tenant_id": tenant_id,
+    }
 
 
 class ActionSpan:
@@ -28,7 +65,7 @@ class ActionSpan:
     is not ``"true"`` every method is a no-op.
     """
 
-    def __init__(self, span: Optional[object]) -> None:
+    def __init__(self, span: object | None) -> None:
         self._span = span
         self._input_bytes: int = 0
         self._output_bytes: int = 0
@@ -58,18 +95,13 @@ def _err_class(exc: BaseException) -> str:
 def start_action(plugin_name: str, action_id: str, permission: str) -> Iterator[ActionSpan]:
     """Open an ``agent.action`` span + emit the canonical metric pair."""
     try:
-        from opentelemetry import metrics as _metrics
         from opentelemetry import trace as _trace
     except ImportError:
         yield ActionSpan(None)
         return
 
     tracer = _trace.get_tracer(TRACER_NAME)
-    meter = _metrics.get_meter(METER_NAME)
-    counter = meter.create_counter("mirastack_agent_actions_total")
-    histogram = meter.create_histogram(
-        "mirastack_agent_action_latency_seconds", unit="s"
-    )
+    counter, histogram = _action_instruments()
 
     start = time.monotonic()
     outcome = "ok"
@@ -109,6 +141,7 @@ def start_action(plugin_name: str, action_id: str, permission: str) -> Iterator[
                 "action": action_id,
                 "outcome": outcome,
             }
+            metric_attrs.update(_identity_metric_attrs())
             try:
                 counter.add(1, attributes=metric_attrs)
                 histogram.record(elapsed, attributes=metric_attrs)

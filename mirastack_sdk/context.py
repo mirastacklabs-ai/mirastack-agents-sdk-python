@@ -15,6 +15,7 @@ from typing import Any
 
 import grpc
 
+from mirastack_sdk.grpc_msgsize import resolve_max_message_bytes
 from mirastack_sdk.plugin import Permission
 
 # Default config cache TTL in seconds.
@@ -27,15 +28,17 @@ _DEFAULT_CONFIG_CACHE_TTL = 15
 #   PERMISSION_READ        = 1
 #   PERMISSION_MODIFY      = 2
 #   PERMISSION_ADMIN       = 3
+#   PERMISSION_WRITE       = 4
 #
 # The SDK-side ``Permission`` IntEnum is offset by 1 (READ=0, MODIFY=1,
-# ADMIN=2) for backward compatibility with existing plugin code. We use an
+# ADMIN=2, WRITE=3) for backward compatibility with existing plugin code. We use an
 # explicit mapping here \u2014 NEVER a direct ``int(p) + 1`` cast \u2014 to keep
 # the offset visible and to ensure unrecognised values fail closed.
 _PROTO_PERMISSION_UNSPECIFIED = 0
 _PROTO_PERMISSION_READ = 1
 _PROTO_PERMISSION_MODIFY = 2
 _PROTO_PERMISSION_ADMIN = 3
+_PROTO_PERMISSION_WRITE = 4
 
 
 def _permission_to_proto(permission: Permission) -> int:
@@ -51,7 +54,20 @@ def _permission_to_proto(permission: Permission) -> int:
         return _PROTO_PERMISSION_MODIFY
     if permission == Permission.ADMIN:
         return _PROTO_PERMISSION_ADMIN
+    if permission == Permission.WRITE:
+        return _PROTO_PERMISSION_WRITE
     return _PROTO_PERMISSION_MODIFY
+
+
+def _validate_target_plugin_name(target_plugin: str) -> str:
+    normalized = target_plugin.strip()
+    if not normalized:
+        raise ValueError("target plugin is required")
+    if ":" in normalized:
+        raise ValueError(
+            f"target plugin {target_plugin!r} is invalid: pass plugin name only and set action in params"
+        )
+    return normalized
 
 
 class EngineContext:
@@ -65,12 +81,15 @@ class EngineContext:
         # UUID5 of the tenant this plugin instance serves. Auto-stamped on
         # every outbound gRPC request so plugin authors never set it manually.
         self._tenant_id = tenant_id
+        max_msg_bytes = resolve_max_message_bytes()
         self._channel = grpc.insecure_channel(
             engine_addr,
             options=[
                 ("grpc.keepalive_time_ms", 30000),
                 ("grpc.keepalive_timeout_ms", 10000),
                 ("grpc.keepalive_permit_without_calls", 1),
+                ("grpc.max_receive_message_length", max_msg_bytes),
+                ("grpc.max_send_message_length", max_msg_bytes),
             ],
         )
 
@@ -84,7 +103,9 @@ class EngineContext:
         # Attempt to import generated stubs; fall back to generic invocation.
         self._stub: Any = None
         try:
-            from mirastack_sdk.gen import plugin_pb2_grpc  # type: ignore[import-untyped]
+            from mirastack_sdk.gen import (
+                plugin_pb2_grpc,  # type: ignore[import-untyped]
+            )
             self._stub = plugin_pb2_grpc.EngineServiceStub(self._channel)
         except ImportError:
             pass
@@ -180,16 +201,16 @@ class EngineContext:
         """Send a log entry to the engine's event stream."""
         await asyncio.to_thread(self._log_event_sync, level, message, fields)
 
-    async def call_plugin(self, target_plugin: str, params: dict[str, str]) -> dict[str, str]:
-        """Invoke another plugin through the engine and return its output."""
+    async def call_plugin(self, target_plugin: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Invoke another plugin through the engine and return native JSON output."""
         return await self.call_plugin_with_time_range(target_plugin, params, None)
 
     async def call_plugin_with_time_range(
         self,
         target_plugin: str,
-        params: dict[str, str],
+        params: dict[str, Any],
         time_range: dict | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Invoke another plugin, propagating the given TimeRange.
 
         Use this when orchestrating agent-to-agent calls from within an
@@ -198,14 +219,14 @@ class EngineContext:
 
         Args:
             target_plugin: Name of the plugin to invoke.
-            params: Key-value parameters for the target plugin.
+            params: Native JSON parameters for the target plugin.
             time_range: Optional dict with start_epoch_ms, end_epoch_ms,
                         timezone, original_expression. Pass
                         ``dataclasses.asdict(req.time_range)`` from the
                         incoming ExecuteRequest.
 
         Returns:
-            Dictionary of output key-value pairs from the target plugin.
+            Native JSON output object from the target plugin.
         """
         return await asyncio.to_thread(
             self._call_plugin_with_time_range_sync, target_plugin, params, time_range,
@@ -336,7 +357,7 @@ class EngineContext:
             {"key": key, "value": value.encode(), "ttl_seconds": ttl_seconds, "tenant_id": self._tenant_id},
         )
 
-    def _publish_result_sync(self, execution_id: str, output: dict[str, str]) -> None:
+    def _publish_result_sync(self, execution_id: str, output: dict[str, Any]) -> None:
         result_json = json.dumps(output).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]
@@ -405,9 +426,10 @@ class EngineContext:
     def _call_plugin_with_time_range_sync(
         self,
         target_plugin: str,
-        params: dict[str, str],
+        params: dict[str, Any],
         time_range: dict | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
+        target_plugin = _validate_target_plugin_name(target_plugin)
         params_json = json.dumps(params).encode()
         if self._stub is not None:
             from mirastack_sdk.gen import plugin_pb2  # type: ignore[import-untyped]

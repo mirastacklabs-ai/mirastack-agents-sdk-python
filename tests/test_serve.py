@@ -8,15 +8,22 @@ from typing import Any
 from unittest import mock
 
 from mirastack_sdk.plugin import (
+    ROUTING_SEMANTICS_SCHEMA_VERSION_V1,
+    Action,
+    DevOpsStage,
     ExecuteRequest,
     ExecuteResponse,
+    Permission,
     Plugin,
     PluginInfo,
     PluginSchema,
+    RoutingSemantics,
 )
 from mirastack_sdk.serve import (
     _absorb_license_snapshot,
+    _action_to_dict,
     _maintain_registration,
+    _PluginServiceAdapter,
     _resolve_advertise_addr,
 )
 
@@ -39,6 +46,31 @@ class _StubPlugin(Plugin):
         return ExecuteResponse()
 
 
+class _ActionPlugin(_StubPlugin):
+    def info(self) -> PluginInfo:
+        return PluginInfo(
+            name="query-vmetrics",
+            version="1.0.0",
+            description="Metrics query plugin",
+            devops_stages=[DevOpsStage.OBSERVE],
+            actions=[
+                Action(
+                    id="query_instant",
+                    description="Run instant metric query",
+                    permission=Permission.READ,
+                    stages=[DevOpsStage.OBSERVE],
+                    routing=RoutingSemantics(
+                        schema_version=ROUTING_SEMANTICS_SCHEMA_VERSION_V1,
+                        accepted_intent_domains=["core.observability.metric_query"],
+                        capability_domain="core.observability.metric_query",
+                        positive_use_cases=["Run metric query"],
+                        negative_use_cases=["Manage backup jobs"],
+                    ),
+                )
+            ],
+        )
+
+
 def _new_stub_plugin() -> _StubPlugin:
     return _StubPlugin()
 
@@ -59,7 +91,7 @@ class _FastStopEvent:
     def set(self) -> None:
         self._set = True
 
-    def wait(self, timeout: float | None = None) -> bool:  # noqa: ARG002
+    def wait(self, timeout: float | None = None) -> bool:
         """Return current state immediately — no blocking."""
         return self._set
 
@@ -338,3 +370,18 @@ class TestAbsorbLicenseSnapshot:
         with caplog.at_level(logging.INFO, logger="mirastack_sdk"):
             _absorb_license_snapshot(plugin, raw)
         assert not [rec for rec in caplog.records if "license" in rec.message.lower()]
+
+
+class TestActionRoutingSerialization:
+    def test_action_to_dict_includes_routing_semantics(self) -> None:
+        action = _ActionPlugin().info().actions[0]
+        data = _action_to_dict(action)
+        assert "routing_semantics" in data
+        routing = data["routing_semantics"]
+        assert routing["schema_version"] == ROUTING_SEMANTICS_SCHEMA_VERSION_V1
+        assert routing["capability_domain"] == "core.observability.metric_query"
+
+    def test_info_includes_plugin_type_agent(self) -> None:
+        adapter = _PluginServiceAdapter(_ActionPlugin(), loop=mock.MagicMock())
+        data = adapter.Info({}, None)
+        assert data["type"] == 1

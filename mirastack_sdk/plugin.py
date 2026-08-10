@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Mapping
+from typing import Any
 
 
 class Permission(IntEnum):
     READ = 0
     MODIFY = 1
     ADMIN = 2
+    WRITE = 3
 
 
 class DevOpsStage(IntEnum):
@@ -44,6 +46,21 @@ class IntentPattern:
     pattern: str
     description: str = ""
     priority: int = 0
+
+
+ROUTING_SEMANTICS_SCHEMA_VERSION_V1 = "mirastack.routing_semantics/v1"
+
+
+@dataclass
+class RoutingSemantics:
+    schema_version: str = ROUTING_SEMANTICS_SCHEMA_VERSION_V1
+    accepted_intent_domains: list[str] = field(default_factory=list)
+    capability_domain: str = ""
+    positive_use_cases: list[str] = field(default_factory=list)
+    negative_use_cases: list[str] = field(default_factory=list)
+    signal_domains: list[str] = field(default_factory=list)
+    backend_domains: list[str] = field(default_factory=list)
+    entity_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -102,6 +119,7 @@ class Action:
     intents: list[IntentPattern] = field(default_factory=list)
     input_params: list[ParamSchema] = field(default_factory=list)
     output_params: list[ParamSchema] = field(default_factory=list)
+    routing: RoutingSemantics = field(default_factory=RoutingSemantics)
 
 
 @dataclass
@@ -179,11 +197,9 @@ class Plugin(abc.ABC):
 
     async def health_check(self) -> None:
         """Return None if healthy, raise an exception otherwise."""
-        pass
 
     async def config_updated(self, config: dict[str, str]) -> None:
         """Called when the engine pushes new configuration."""
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +228,7 @@ class LicenseQuotas:
     max_agentic_sessions_per_day: int = 0
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any] | None) -> "LicenseQuotas":
+    def from_dict(cls, data: Mapping[str, Any] | None) -> LicenseQuotas:
         """Build a typed quotas value from the engine's JSON dict.
 
         Returns a zero-valued instance when ``data`` is ``None`` or empty —
@@ -263,7 +279,7 @@ class LicenseContext:
     quotas: LicenseQuotas = field(default_factory=LicenseQuotas)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any] | None) -> "LicenseContext | None":
+    def from_dict(cls, data: Mapping[str, Any] | None) -> LicenseContext | None:
         """Build a typed context from the engine's JSON dict.
 
         Returns ``None`` when ``data`` is ``None`` (engine could not

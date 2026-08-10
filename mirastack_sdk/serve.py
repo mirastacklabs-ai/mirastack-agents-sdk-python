@@ -26,20 +26,46 @@ from concurrent import futures
 
 import grpc
 
-from mirastack_sdk.context import EngineContext
-from mirastack_sdk._otel import init_otel, get_tracer
+from mirastack_sdk._logging import init_logging_handler
 from mirastack_sdk._metrics import init_meter_provider
-from mirastack_sdk.tenantid import id_from_slug
+from mirastack_sdk._otel import get_tracer, init_otel
+from mirastack_sdk.context import EngineContext
+from mirastack_sdk.grpc_msgsize import resolve_max_message_bytes
 from mirastack_sdk.plugin import (
-    Plugin,
     ExecuteRequest,
     ExecutionMode,
     LicenseContext,
     ParamSchema,
+    Plugin,
     TimeRange,
 )
+from mirastack_sdk.tenantid import id_from_slug
 
 logger = logging.getLogger("mirastack_sdk")
+
+
+def _current_trace_id_hex() -> str:
+    try:
+        from opentelemetry import trace as _trace
+
+        span_ctx = _trace.get_current_span().get_span_context()
+        if span_ctx and span_ctx.is_valid:
+            return format(span_ctx.trace_id, "032x")
+    except Exception:
+        return ""
+    return ""
+
+
+def _execute_log_extra(tenant_id: str, execution_id: str, action_id: str) -> dict:
+    extra = {
+        "tenant_id": (tenant_id or "").strip() or "unresolved",
+        "execution_id": (execution_id or "").strip(),
+        "action_id": (action_id or "").strip(),
+    }
+    trace_id = _current_trace_id_hex()
+    if trace_id:
+        extra["trace_id"] = trace_id
+    return extra
 
 
 def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
@@ -59,7 +85,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
         sys.exit(1)
 
     # ── Quality gate ──────────────────────────────────────────────────
-    from mirastack_sdk.validate import validate_plugin  # noqa: E402
+    from mirastack_sdk.validate import validate_plugin
 
     gate_errors = validate_plugin(info)
     if gate_errors:
@@ -90,6 +116,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     if listen_addr.startswith(":"):
         listen_addr = "0.0.0.0" + listen_addr
 
+    max_msg_bytes = resolve_max_message_bytes()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=max_workers),
         options=[
@@ -97,6 +124,8 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
             ("grpc.keepalive_timeout_ms", 10000),        # wait 10s for ping ack
             ("grpc.keepalive_permit_without_calls", 1),  # allow pings with no active RPCs
             ("grpc.http2.min_recv_ping_interval_without_data_in_seconds", 20),  # allow client pings every 20s
+            ("grpc.max_receive_message_length", max_msg_bytes),  # max inbound gRPC message bytes
+            ("grpc.max_send_message_length", max_msg_bytes),     # max outbound gRPC message bytes
         ],
     )
 
@@ -126,6 +155,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
     # Initialize OpenTelemetry (no-op when MIRASTACK_OTEL_ENABLED != "true")
     otel_shutdown = init_otel(info.name)
     meter_shutdown = init_meter_provider(info.name)
+    logs_shutdown = init_logging_handler(info.name)
 
     # Write the actual port to stdout for the engine to discover
     print(f"MIRASTACK_PLUGIN_PORT={port}", flush=True)
@@ -189,6 +219,7 @@ def serve(plugin: Plugin, *, max_workers: int = 10) -> None:
                 logger.warning("Deregistration from engine failed", exc_info=True)
         otel_shutdown()
         meter_shutdown()
+        logs_shutdown()
         server.stop(grace=5)
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -224,6 +255,7 @@ class _PluginServiceAdapter:
             "name": info.name,
             "version": info.version,
             "description": info.description,
+            "type": 1,  # PluginTypeAgent
             "permission": (info.permissions[0].value + 1) if info.permissions else 1,
             "devops_stages": [s.value + 1 for s in info.devops_stages],
             "default_intents": [
@@ -281,6 +313,7 @@ class _PluginServiceAdapter:
         tracer = get_tracer()
         action_id = request.get("action_id", "")
         execution_id = request.get("execution_id", "")
+        tenant_id = request.get("tenant_id", "")
 
         span_ctx = None
         span = None
@@ -302,12 +335,21 @@ class _PluginServiceAdapter:
                 _trace.set_span_in_context(span)
             )
 
+        logger.info(
+            "Executing plugin action",
+            extra=_execute_log_extra(tenant_id, execution_id, action_id),
+        )
         try:
             result = self._execute_inner(request, context)
             if span is not None:
                 span.set_attribute("plugin.success", True)
             return result
         except Exception as exc:
+            logger.warning(
+                "Plugin execution failed",
+                exc_info=True,
+                extra=_execute_log_extra(tenant_id, execution_id, action_id),
+            )
             if span is not None:
                 span.record_exception(exc)
                 from opentelemetry.trace import StatusCode
@@ -411,6 +453,16 @@ def _action_to_dict(act) -> dict:
         d["output_params"] = json.dumps(
             [_param_to_dict(p) for p in act.output_params]
         ).encode()
+    d["routing_semantics"] = {
+        "schema_version": act.routing.schema_version,
+        "accepted_intent_domains": list(act.routing.accepted_intent_domains),
+        "capability_domain": act.routing.capability_domain,
+        "positive_use_cases": list(act.routing.positive_use_cases),
+        "negative_use_cases": list(act.routing.negative_use_cases),
+        "signal_domains": list(act.routing.signal_domains),
+        "backend_domains": list(act.routing.backend_domains),
+        "entity_types": list(act.routing.entity_types),
+    }
     return d
 
 

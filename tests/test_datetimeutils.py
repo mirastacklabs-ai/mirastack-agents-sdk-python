@@ -1,23 +1,22 @@
 """Tests for mirastack_sdk.datetimeutils."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from mirastack_sdk.datetimeutils import (
-    format_epoch_seconds,
-    format_epoch_millis,
-    format_epoch_micros,
-    format_epoch_nanos,
-    format_rfc3339,
-    format_rfc3339_nano,
+    format_custom,
     format_date,
     format_datetime,
-    format_custom,
+    format_epoch_micros,
+    format_epoch_millis,
+    format_epoch_nanos,
+    format_epoch_seconds,
     format_in_timezone,
     format_lookback_millis,
-    to_datetime,
+    format_rfc3339,
+    format_rfc3339_nano,
     from_datetime,
+    to_datetime,
 )
-
 
 # 2026-04-02T12:30:00Z in epoch ms
 TEST_MS = 1775133000000
@@ -76,11 +75,11 @@ def test_to_datetime():
     assert dt.day == 2
     assert dt.hour == 12
     assert dt.minute == 30
-    assert dt.tzinfo == timezone.utc
+    assert dt.tzinfo == UTC
 
 
 def test_from_datetime():
-    dt = datetime(2026, 4, 2, 12, 30, 0, tzinfo=timezone.utc)
+    dt = datetime(2026, 4, 2, 12, 30, 0, tzinfo=UTC)
     assert from_datetime(dt) == TEST_MS
 
 

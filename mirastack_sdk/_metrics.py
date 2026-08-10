@@ -9,17 +9,60 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable
+from collections.abc import Callable
 
 from mirastack_sdk._otel import COMPONENT_KIND, otel_enabled
 
 logger = logging.getLogger("mirastack_sdk.metrics")
 
-METRICS_INTERVAL_MS = 60_000
+DEFAULT_METRICS_INTERVAL_MS = 60_000
 
 
 def _noop_shutdown() -> None:
     pass
+
+
+def _parse_duration_ms(raw: str) -> int | None:
+    value = raw.strip().lower()
+    if not value:
+        return None
+    units = (
+        ("ms", 1),
+        ("s", 1_000),
+        ("m", 60_000),
+        ("h", 3_600_000),
+    )
+    for suffix, factor in units:
+        if value.endswith(suffix):
+            number = value[: -len(suffix)].strip()
+            if not number:
+                return None
+            try:
+                parsed = float(number)
+            except ValueError:
+                return None
+            if parsed <= 0:
+                return None
+            return int(parsed * factor)
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _metrics_interval_ms() -> int:
+    raw = os.environ.get("MIRASTACK_OTEL_METRIC_EXPORT_INTERVAL", "").strip()
+    if not raw:
+        return DEFAULT_METRICS_INTERVAL_MS
+    parsed = _parse_duration_ms(raw)
+    if parsed is None:
+        logger.warning(
+            "invalid MIRASTACK_OTEL_METRIC_EXPORT_INTERVAL; using SDK default: %s",
+            raw,
+        )
+        return DEFAULT_METRICS_INTERVAL_MS
+    return parsed
 
 
 def init_meter_provider(plugin_name: str) -> Callable[[], None]:
@@ -40,9 +83,9 @@ def init_meter_provider(plugin_name: str) -> Callable[[], None]:
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
         from opentelemetry.sdk.resources import (
-            Resource,
             SERVICE_NAME,
             SERVICE_VERSION,
+            Resource,
         )
     except ImportError:
         logger.warning(
@@ -62,14 +105,15 @@ def init_meter_provider(plugin_name: str) -> Callable[[], None]:
         }
     )
     exporter = OTLPMetricExporter()
-    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=METRICS_INTERVAL_MS)
+    interval_ms = _metrics_interval_ms()
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=interval_ms)
     provider = MeterProvider(resource=resource, metric_readers=[reader])
     metrics.set_meter_provider(provider)
 
     logger.info(
         "OTel metrics enabled for plugin: service=%s interval=%dms",
         service_name,
-        METRICS_INTERVAL_MS,
+        interval_ms,
     )
 
     def shutdown() -> None:

@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Base helper
 # ---------------------------------------------------------------------------
@@ -26,7 +25,7 @@ class _Msg:
         return json.dumps(self._to_dict()).encode()
 
     @classmethod
-    def FromString(cls, data: bytes) -> "_Msg":
+    def FromString(cls, data: bytes) -> _Msg:
         d = json.loads(data) if data else {}
         return cls(**{k: v for k, v in d.items() if k in cls.__init__.__code__.co_varnames})
 
@@ -49,28 +48,43 @@ class InfoResponse(_Msg):
         name: str = "",
         version: str = "",
         description: str = "",
+        type: int = 0,
         permission: int = 0,
         devops_stages: list[int] | None = None,
         default_intents: list[dict[str, Any]] | None = None,
+        actions: list[dict[str, Any]] | None = None,
+        prompt_templates: list[dict[str, Any]] | None = None,
+        config_schema: list[dict[str, Any]] | None = None,
         metadata: dict[str, str] | None = None,
+        instance_id: str = "",
     ) -> None:
         self.name = name
         self.version = version
         self.description = description
+        self.type = type
         self.permission = permission
         self.devops_stages = devops_stages or []
         self.default_intents = default_intents or []
+        self.actions = actions or []
+        self.prompt_templates = prompt_templates or []
+        self.config_schema = config_schema or []
         self.metadata = metadata or {}
+        self.instance_id = instance_id
 
     def _to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "version": self.version,
             "description": self.description,
+            "type": self.type,
             "permission": self.permission,
             "devops_stages": self.devops_stages,
             "default_intents": self.default_intents,
+            "actions": self.actions,
+            "prompt_templates": self.prompt_templates,
+            "config_schema": self.config_schema,
             "metadata": self.metadata,
+            "instance_id": self.instance_id,
         }
 
 

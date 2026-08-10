@@ -23,7 +23,7 @@ Usage in a plugin::
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 
@@ -64,7 +64,7 @@ def format_rfc3339(epoch_ms: int) -> str:
 
     Used by: REST APIs, JSON responses, general-purpose interchange.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -73,7 +73,7 @@ def format_rfc3339_nano(epoch_ms: int) -> str:
 
     Used by: High-precision timestamp logging.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{epoch_ms % 1000:03d}Z"
 
 
@@ -82,7 +82,7 @@ def format_date(epoch_ms: int) -> str:
 
     Used by: Date-only queries, partition keys.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     return dt.strftime("%Y-%m-%d")
 
 
@@ -91,7 +91,7 @@ def format_datetime(epoch_ms: int) -> str:
 
     Used by: Human-readable logs, audit trails.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -100,7 +100,7 @@ def format_custom(epoch_ms: int, fmt: str) -> str:
 
     Used by: Plugin-specific formats not covered by the standard functions.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     return dt.strftime(fmt)
 
 
@@ -117,7 +117,7 @@ def format_in_timezone(epoch_ms: int, tz: str) -> str:
     Raises:
         KeyError: If the timezone name is invalid.
     """
-    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
     local_dt = dt.astimezone(ZoneInfo(tz))
     offset = local_dt.strftime("%z")
     # Format offset as +HH:MM
@@ -135,7 +135,7 @@ def format_lookback_millis(start_ms: int, end_ms: int) -> str:
 
 def to_datetime(epoch_ms: int) -> datetime:
     """Convert UTC epoch milliseconds to a Python datetime (UTC)."""
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC)
 
 
 def from_datetime(dt: datetime) -> int:
@@ -149,4 +149,4 @@ def now_utc_ms() -> int:
     Use this for default time windows instead of time.time() or
     datetime.now() in plugin code.
     """
-    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    return int(datetime.now(tz=UTC).timestamp() * 1000)

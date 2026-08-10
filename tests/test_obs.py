@@ -6,6 +6,7 @@ import pytest
 
 from mirastack_sdk._metrics import init_meter_provider
 from mirastack_sdk._otel import init_otel
+from mirastack_sdk.obs import obs as obs_module
 from mirastack_sdk.obs import start_action
 from mirastack_sdk.obs.obs import _err_class
 
@@ -34,9 +35,8 @@ def test_start_action_propagates_exception():
     class CustomError(Exception):
         pass
 
-    with pytest.raises(CustomError):
-        with start_action("query_metrics", "rate", "READ"):
-            raise CustomError("boom")
+    with pytest.raises(CustomError), start_action("query_metrics", "rate", "READ"):
+        raise CustomError("boom")
 
 
 def test_err_class_returns_qualified_name():
@@ -52,3 +52,34 @@ def test_err_class_returns_qualified_name():
 def test_err_class_handles_builtin():
     err = ValueError("x")
     assert _err_class(err) == "ValueError"
+
+
+class _FakeCounter:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def add(self, value, attributes=None):
+        self.calls.append({"value": value, "attributes": dict(attributes or {})})
+
+
+class _FakeHistogram:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def record(self, value, attributes=None):
+        self.calls.append({"value": value, "attributes": dict(attributes or {})})
+
+
+def test_start_action_metrics_include_tenant_and_component(monkeypatch):
+    counter = _FakeCounter()
+    histogram = _FakeHistogram()
+    monkeypatch.setenv("MIRASTACK_PLUGIN_TENANT_ID", "tenant-test")
+    monkeypatch.setattr(obs_module, "_action_instruments", lambda: (counter, histogram))
+
+    with start_action("query_metrics", "rate", "READ"):
+        pass
+
+    assert counter.calls, "expected counter.add to be called"
+    attrs = counter.calls[0]["attributes"]
+    assert attrs["tenant_id"] == "tenant-test"
+    assert attrs["mirastack.component_kind"] == "agent"

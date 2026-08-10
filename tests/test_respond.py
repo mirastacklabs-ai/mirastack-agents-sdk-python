@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from mirastack_sdk.respond import respond_map, respond_json, respond_error, respond_raw
+from mirastack_sdk.respond import respond_error, respond_json, respond_map, respond_raw
 
 
 class TestRespondMap(unittest.TestCase):

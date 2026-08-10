@@ -2,7 +2,7 @@
 
 import unittest
 
-from mirastack_sdk.context import EngineContext
+from mirastack_sdk.context import EngineContext, _validate_target_plugin_name
 from mirastack_sdk.gen import plugin_pb2
 
 
@@ -95,6 +95,15 @@ class TestEngineContextKPICallbacks(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1][1]["tenant_id"], "tenant-z")
 
         await ctx.close()
+
+
+class TestEngineContextPluginTargetValidation(unittest.TestCase):
+    def test_rejects_colon_qualified_target(self):
+        with self.assertRaisesRegex(ValueError, "set action in params"):
+            _validate_target_plugin_name("query_vmetrics:range_query")
+
+    def test_accepts_canonical_plugin_name(self):
+        self.assertEqual(_validate_target_plugin_name(" query_vmetrics "), "query_vmetrics")
 
 
 if __name__ == "__main__":

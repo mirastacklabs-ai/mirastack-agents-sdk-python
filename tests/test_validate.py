@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from mirastack_sdk.plugin import (
+    ROUTING_SEMANTICS_SCHEMA_VERSION_V1,
     Action,
     ConfigParam,
     DevOpsStage,
     Permission,
     PluginInfo,
+    RoutingSemantics,
 )
 from mirastack_sdk.validate import validate_plugin
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,16 @@ def _valid_info() -> PluginInfo:
                 description="Run an instant PromQL query",
                 permission=Permission.READ,
                 stages=[DevOpsStage.OBSERVE],
+                routing=RoutingSemantics(
+                    schema_version=ROUTING_SEMANTICS_SCHEMA_VERSION_V1,
+                    accepted_intent_domains=["core.observability.metric_query"],
+                    capability_domain="core.observability.metric_query",
+                    positive_use_cases=["Run instant metric query"],
+                    negative_use_cases=["Manage backup jobs"],
+                    signal_domains=["signal.metrics"],
+                    backend_domains=["backend.victoriametrics"],
+                    entity_types=["entity.service"],
+                ),
             ),
         ],
     )
@@ -46,6 +57,13 @@ class TestValidAgent:
                 description="Run a range PromQL query",
                 permission=Permission.READ,
                 stages=[DevOpsStage.OBSERVE],
+                routing=RoutingSemantics(
+                    schema_version=ROUTING_SEMANTICS_SCHEMA_VERSION_V1,
+                    accepted_intent_domains=["core.observability.metric_query"],
+                    capability_domain="core.observability.metric_query",
+                    positive_use_cases=["Run range metric query"],
+                    negative_use_cases=["Delete buckets"],
+                ),
             )
         )
         assert validate_plugin(info) == []
@@ -128,6 +146,12 @@ class TestActionGates:
         info.actions = [Action(id="query_instant", description="Query metrics", stages=[])]
         errs = validate_plugin(info)
         assert any("at least one DevOps stage" in e for e in errs)
+
+    def test_invalid_routing_semantics(self):
+        info = _valid_info()
+        info.actions[0].routing.accepted_intent_domains = ["not-namespaced"]
+        errs = validate_plugin(info)
+        assert any("invalid routing semantics" in e for e in errs)
 
 
 # ── ConfigParam gates ─────────────────────────────────────────────────────
